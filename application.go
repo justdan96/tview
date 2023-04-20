@@ -1,10 +1,13 @@
 package tview
 
 import (
+	"context"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/gookit/goutil/errorx"
 )
 
 const (
@@ -60,11 +63,14 @@ type queuedUpdate struct {
 // The following command displays a primitive p on the screen until Ctrl-C is
 // pressed:
 //
-//	if err := tview.NewApplication().SetRoot(p, true).Run(); err != nil {
-//	    panic(err)
-//	}
+//   if err := tview.NewApplication().SetRoot(p, true).Run(); err != nil {
+//       panic(err)
+//   }
 type Application struct {
 	sync.RWMutex
+
+	runContext    context.Context
+	runCancelFunc context.CancelFunc
 
 	// The application's screen. Apart from Run(), this variable should never be
 	// set directly. Always use the screenReplacement channel after calling
@@ -88,9 +94,18 @@ type Application struct {
 	// be forwarded).
 	inputCapture func(event *tcell.EventKey) *tcell.EventKey
 
+  // An optional callback function which is invoked before the application's
+	// focus changes.
+	beforeFocus func(p Primitive) bool
+	// An optional callback function which is invoked after the application's
+	// focus changes.
+	afterFocus func(p Primitive)
+  onPaste func(screen tcell.Screen, ev *tcell.EventPaste)
+
 	// An optional callback function which is invoked just before the root
 	// primitive is drawn.
 	beforeDraw func(screen tcell.Screen) bool
+	afterResize func(screen tcell.Screen)
 
 	// An optional callback function which is invoked after the root primitive
 	// was drawn.
@@ -120,9 +135,40 @@ type Application struct {
 	lastMouseButtons        tcell.ButtonMask // The last mouse button state.
 }
 
+func (a *Application) Close() error {
+	a.runCancelFunc()
+	close(a.events)
+	close(a.screenReplacement)
+	close(a.updates)
+
+	// flush events channel
+	go func() {
+		for range a.events {
+		}
+	}()
+	// flush screenReplacement channel
+	go func() {
+		for range a.screenReplacement {
+		}
+	}()
+	// flush updates channel
+	go func() {
+		for up := range a.updates {
+			// important  to set done for calling channel to be able to return
+			_ = up
+			// up.done <- struct{}{}
+		}
+	}()
+
+	return nil
+}
+
 // NewApplication creates and returns a new application.
 func NewApplication() *Application {
+	cancelContext, cancelFunc := context.WithCancel(context.Background())
 	return &Application{
+		runContext:        cancelContext,
+		runCancelFunc:     cancelFunc,
 		events:            make(chan tcell.Event, queueSize),
 		updates:           make(chan queuedUpdate, queueSize),
 		screenReplacement: make(chan tcell.Screen, 1),
@@ -135,16 +181,9 @@ func NewApplication() *Application {
 // different one) by returning it or stop the key event processing by returning
 // nil.
 //
-// The only default global key event is Ctrl-C which stops the application. It
-// requires special handling:
-//
-//   - If you do not wish to change the default behavior, return the original
-//     event object passed to your input capture function.
-//   - If you wish to block Ctrl-C from any functionality, return nil.
-//   - If you do not wish Ctrl-C to stop the application but still want to
-//     forward the Ctrl-C event to primitives down the hierarchy, return a new
-//     key event with the same key and modifiers, e.g.
-//     tcell.NewEventKey(tcell.KeyCtrlC, 0, tcell.ModNone).
+// Note that this also affects the default event handling of the application
+// itself: Such a handler can intercept the Ctrl-C event which closes the
+// application.
 func (a *Application) SetInputCapture(capture func(event *tcell.EventKey) *tcell.EventKey) *Application {
 	a.inputCapture = capture
 	return a
@@ -188,7 +227,6 @@ func (a *Application) SetScreen(screen tcell.Screen) *Application {
 		// Run() has not been called yet.
 		a.screen = screen
 		a.Unlock()
-		screen.Init()
 		return a
 	}
 
@@ -196,7 +234,10 @@ func (a *Application) SetScreen(screen tcell.Screen) *Application {
 	oldScreen := a.screen
 	a.Unlock()
 	oldScreen.Fini()
-	a.screenReplacement <- screen
+	// check to see if the Application.Run is still valid
+	if a.runContext.Err() == nil {
+		a.screenReplacement <- screen
+	}
 
 	return a
 }
@@ -260,8 +301,15 @@ func (a *Application) Run() error {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
+		defer func() {
+			// call the runCancelFunc when exiting this function.
+			//This will stop the channels accepting any more events
+			a.runCancelFunc()
+		}()
 		defer wg.Done()
-		for {
+
+		// check to see if the Application.Run is still valid
+		for a.runContext.Err() == nil {
 			a.RLock()
 			screen := a.screen
 			a.RUnlock()
@@ -279,37 +327,47 @@ func (a *Application) Run() error {
 				continue
 			}
 
-			// A screen was finalized (event is nil). Wait for a new scren.
-			screen = <-a.screenReplacement
-			if screen == nil {
-				// No new screen. We're done.
-				a.QueueEvent(nil)
+			// A screen was finalized (event is nil). Wait for a new screen.
+			var ok bool
+			select {
+			// exit when runContext complete
+			case <-a.runContext.Done():
 				return
-			}
+			case screen, ok = <-a.screenReplacement:
+				if !ok || screen == nil {
+					// No new screen. We're done.
+					a.QueueEvent(nil)
+					return
+				}
 
-			// We have a new screen. Keep going.
-			a.Lock()
-			a.screen = screen
-			enableMouse := a.enableMouse
-			a.Unlock()
+				// We have a new screen. Keep going.
+				a.Lock()
+				a.screen = screen
+				enableMouse := a.enableMouse
+				a.Unlock()
 
-			// Initialize and draw this screen.
-			if err := screen.Init(); err != nil {
-				panic(err)
+				// Initialize and draw this screen.
+				if err := screen.Init(); err != nil {
+					panic(err)
+				}
+				if enableMouse {
+					screen.EnableMouse()
+				}
+				a.draw()
 			}
-			if enableMouse {
-				screen.EnableMouse()
-			}
-			a.draw()
 		}
 	}()
 
 	// Start event loop.
 EventLoop:
-	for {
+	// check to see if the Application.Run is still valid
+	for a.runContext.Err() == nil {
 		select {
-		case event := <-a.events:
-			if event == nil {
+		// break loop when runContext complete
+		case <-a.runContext.Done():
+			break EventLoop
+		case event, ok := <-a.events:
+			if !ok || event == nil {
 				break EventLoop
 			}
 
@@ -322,7 +380,6 @@ EventLoop:
 
 				// Intercept keys.
 				var draw bool
-				originalEvent := event
 				if inputCapture != nil {
 					event = inputCapture(event)
 					if event == nil {
@@ -333,7 +390,7 @@ EventLoop:
 				}
 
 				// Ctrl-C closes the application.
-				if event == originalEvent && event.Key() == tcell.KeyCtrlC {
+				if event.Key() == tcell.KeyCtrlC {
 					a.Stop()
 					break
 				}
@@ -352,14 +409,30 @@ EventLoop:
 				if draw {
 					a.draw()
 				}
+    case *tcell.EventPaste:
+      if a.onPaste != nil {
+      a.onPaste(a.screen, event)
+      if event != nil {
+        a.GetFocus().OnPaste([]rune(event.Text()))
+      }
+      break
+    }
+    fmt.Println("No paste handler", event)
+
+    // if event
 			case *tcell.EventResize:
 				if time.Since(lastRedraw) < redrawPause {
 					if redrawTimer != nil {
 						redrawTimer.Stop()
 					}
-					redrawTimer = time.AfterFunc(redrawPause, func() {
-						a.events <- event
-					})
+					redrawTimer = time.AfterFunc(redrawPause,
+						func() {
+							// check to see if the Application.Run is still valid
+							if a.runContext.Err() == nil {
+								a.events <- event
+							}
+						},
+					)
 				}
 				a.RLock()
 				screen := a.screen
@@ -369,6 +442,10 @@ EventLoop:
 				}
 				lastRedraw = time.Now()
 				screen.Clear()
+	resize := a.afterResize
+    if resize != nil {
+      resize(screen)
+    }
 				a.draw()
 			case *tcell.EventMouse:
 				consumed, isMouseDownAction := a.fireMouseActions(event)
@@ -385,13 +462,19 @@ EventLoop:
 			}
 
 		// If we have updates, now is the time to execute them.
-		case update := <-a.updates:
+		case update, ok := <-a.updates:
+			if !ok {
+				break EventLoop
+			}
 			update.f()
 			if update.done != nil {
-				update.done <- struct{}{}
+				// update.done <- struct{}{}
 			}
 		}
 	}
+	// call the runCancelFunc when exiting eventLoop.
+	//This will stop the channels accepting any more events
+	a.runCancelFunc()
 
 	// Wait for the event loop to finish.
 	wg.Wait()
@@ -469,8 +552,8 @@ func (a *Application) fireMouseActions(event *tcell.EventMouse) (consumed, isMou
 			if buttons&buttonEvent.button != 0 {
 				fire(buttonEvent.down)
 			} else {
-				fire(buttonEvent.up) // A user override might set event to nil.
-				if !clickMoved && event != nil {
+				fire(buttonEvent.up)
+				if !clickMoved {
 					if a.lastMouseClick.Add(DoubleClickInterval).Before(time.Now()) {
 						fire(buttonEvent.click)
 						a.lastMouseClick = time.Now()
@@ -509,7 +592,11 @@ func (a *Application) Stop() {
 	}
 	a.screen = nil
 	screen.Fini()
-	a.screenReplacement <- nil
+
+	// check to see if the Application.Run is still valid
+	if a.runContext.Err() == nil {
+		a.screenReplacement <- nil
+	}
 }
 
 // Suspend temporarily suspends the application by exiting terminal UI mode and
@@ -560,10 +647,32 @@ func (a *Application) Suspend(f func()) bool {
 // deadlock your application if you call it from the main thread (e.g. in a
 // callback function of a widget). Please see
 // https://github.com/rivo/tview/wiki/Concurrency for details.
-func (a *Application) Draw() *Application {
-	a.QueueUpdate(func() {
-		a.draw()
+func (a *Application) DrawTo(scr tcell.Screen,p ...Primitive) *Application {
+  a.QueueUpdate(func() {
+		if len(p) == 0 {
+			a.draw()
+			return
+		}
+		a.Lock()
+		if scr != nil {
+			for _, primitive := range p {
+				primitive.Draw(scr)
+			}
+			// a.screen.Show()
+		}
+		a.Unlock()
 	})
+	return a
+}
+
+// Draw refreshes the screen (during the next update cycle). It calls the Draw()
+// function of the application's root primitive and then syncs the screen
+// buffer. It is almost never necessary to call this function. It can actually
+// deadlock your application if you call it from the main thread (e.g. in a
+// callback function of a widget). Please see
+// https://github.com/rivo/tview/wiki/Concurrency for details.
+func (a *Application) Draw(p ...Primitive) *Application {
+  a.DrawTo(a.screen, p...)
 	return a
 }
 
@@ -622,20 +731,89 @@ func (a *Application) draw() *Application {
 	return a
 }
 
+// GetComponentAt returns the highest level component at the given coordinates
+// or zero if no component can be found.
+func (a *Application) GetComponentAt(x, y int) *Primitive {
+	return getComponentAtRecursively(a.root, x, y, a)
+}
+
+func getComponentAtRecursively(primitive Primitive, x, y int, a *Application) *Primitive {
+  if primitive == nil {
+    return nil
+  }
+	if !primitive.IsVisible() {
+		return nil
+	}
+
+	flex, isFlex := primitive.(*Flex)
+	if isFlex {
+		for _, child := range flex.items {
+      child.Item.DrawBorder(true, tcell.StyleDefault, a.screen)
+			found := getComponentAtRecursively(child.Item, x, y, a)
+			if found != nil {
+				return found
+			}
+		}
+		return getSelfIfCoordinatesMatch(primitive, x, y)
+	}
+
+	grid, isGrid := primitive.(*Grid)
+	if isGrid {
+		for _, child := range grid.items {
+			found := getComponentAtRecursively(child.Item, x, y, a)
+			if found != nil {
+				return found
+			}
+		}
+		return getSelfIfCoordinatesMatch(primitive, x, y)
+	}
+
+	pages, isPages := primitive.(*Pages)
+	if isPages {
+		for _, page := range pages.pages {
+			if page.Visible {
+				found := getComponentAtRecursively(page.Item, x, y, a)
+				if found != nil {
+					return found
+				}
+				break
+			}
+		}
+		return getSelfIfCoordinatesMatch(primitive, x, y)
+	}
+
+	return getSelfIfCoordinatesMatch(primitive, x, y)
+}
+
+func getSelfIfCoordinatesMatch(primitive Primitive, x, y int) *Primitive {
+	componentX, componentY, width, height := primitive.GetRect()
+	// Subtracting -1 from height and width, since we got a pixel with coordinate already.
+	if componentX <= x && componentY <= y && (componentX+width-1) >= x && (componentY+height-1) >= y {
+		return &primitive
+	}
+
+	return nil
+}
 // Sync forces a full re-sync of the screen buffer with the actual screen during
 // the next event cycle. This is useful for when the terminal screen is
 // corrupted so you may want to offer your users a keyboard shortcut to refresh
 // the screen.
 func (a *Application) Sync() *Application {
-	a.updates <- queuedUpdate{f: func() {
-		a.RLock()
-		screen := a.screen
-		a.RUnlock()
-		if screen == nil {
-			return
-		}
-		screen.Sync()
-	}}
+	// check to see if the Application.Run is still valid
+	msg := queuedUpdate{
+		f: func() {
+			a.RLock()
+			screen := a.screen
+			a.RUnlock()
+			if screen == nil {
+				return
+			}
+			screen.Sync()
+		},
+	}
+	if a.runContext.Err() == nil {
+		a.updates <- msg
+	}
 	return a
 }
 
@@ -659,6 +837,13 @@ func (a *Application) GetBeforeDrawFunc() func(screen tcell.Screen) bool {
 	return a.beforeDraw
 }
 
+func (a *Application) SetAfterResizeFunc(handler func(screen tcell.Screen)) *Application {
+	a.afterResize = handler
+	return a
+}
+func (a *Application) GetAfterResizeFunc() func(screen tcell.Screen) {
+	return a.afterResize
+}
 // SetAfterDrawFunc installs a callback function which is invoked after the root
 // primitive was drawn during screen updates.
 //
@@ -705,14 +890,22 @@ func (a *Application) ResizeToFullScreen(p Primitive) *Application {
 	return a
 }
 
-// SetFocus sets the focus to a new primitive. All key events will be directed
-// down the hierarchy (starting at the root) until a primitive handles them,
-// which per default goes towards the focused primitive.
+// SetFocus sets the focus on a new primitive. All key events will be redirected
+// to that primitive. Callers must ensure that the primitive will handle key
+// events.
 //
 // Blur() will be called on the previously focused primitive. Focus() will be
 // called on the new primitive.
 func (a *Application) SetFocus(p Primitive) *Application {
 	a.Lock()
+	if a.beforeFocus != nil {
+		a.Unlock()
+		ok := a.beforeFocus(p)
+		if !ok {
+			return a
+		}
+		a.Lock()
+	}
 	if a.focus != nil {
 		a.focus.Blur()
 	}
@@ -720,7 +913,12 @@ func (a *Application) SetFocus(p Primitive) *Application {
 	if a.screen != nil {
 		a.screen.HideCursor()
 	}
-	a.Unlock()
+	if a.afterFocus != nil {
+		a.Unlock()
+		a.afterFocus(p)
+	} else {
+		a.Unlock()
+	}
 	if p != nil {
 		p.Focus(func(p Primitive) {
 			a.SetFocus(p)
@@ -738,6 +936,30 @@ func (a *Application) GetFocus() Primitive {
 	return a.focus
 }
 
+// SetBeforeFocusFunc installs a callback function which is invoked before the
+// application's focus changes. Return false to maintain the current focus.
+//
+// Provide nil to uninstall the callback function.
+func (a *Application) SetBeforeFocusFunc(handler func(p Primitive) bool) {
+	a.Lock()
+	defer a.Unlock()
+	a.beforeFocus = handler
+}
+// SetAfterFocusFunc installs a callback function which is invoked after the
+// application's focus changes.
+//
+// Provide nil to uninstall the callback function.
+func (a *Application) SetAfterFocusFunc(handler func(p Primitive)) {
+	a.Lock()
+	defer a.Unlock()
+	a.afterFocus = handler
+}
+func (a *Application) SetOnPasteFunc(handler func(screen tcell.Screen, ev *tcell.EventPaste)) {
+	a.Lock()
+	defer a.Unlock()
+	a.onPaste = handler
+}
+
 // QueueUpdate is used to synchronize access to primitives from non-main
 // goroutines. The provided function will be executed as part of the event loop
 // and thus will not cause race conditions with other such update functions or
@@ -750,9 +972,26 @@ func (a *Application) GetFocus() Primitive {
 //
 // This function returns after f has executed.
 func (a *Application) QueueUpdate(f func()) *Application {
+	defer func() {
+		if err := recover(); err != nil {
+			if err == nil {
+				fmt.Println(errorx.WithStack(nil))
+			}
+			d := 2
+			d++
+			panic(err)
+		}
+	}()
+	// check to see if the Application.Run is still valid
 	ch := make(chan struct{})
-	a.updates <- queuedUpdate{f: f, done: ch}
-	<-ch
+	msg := queuedUpdate{
+		f:    f,
+		done: ch,
+	}
+	if a.runContext.Err() == nil {
+		a.updates <- msg
+		// <-ch
+	}
 	return a
 }
 
@@ -770,6 +1009,9 @@ func (a *Application) QueueUpdateDraw(f func()) *Application {
 //
 // It is not recommended for event to be nil.
 func (a *Application) QueueEvent(event tcell.Event) *Application {
-	a.events <- event
+	// check to see if the Application.Run is still valid
+	if a.runContext.Err() == nil {
+		a.events <- event
+	}
 	return a
 }

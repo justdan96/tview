@@ -1,6 +1,7 @@
 package tview
 
 import (
+	"fmt"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -192,26 +193,10 @@ type textAreaUndoItem struct {
 type TextArea struct {
 	*Box
 
-	// Whether or not this text area is disabled/read-only.
-	disabled bool
-
-	// The size of the text area. If set to 0, the text area will use the entire
-	// available space.
-	width, height int
-
 	// The text to be shown in the text area when it is empty.
 	placeholder string
 
-	// The label text shown, usually when part of a form.
-	label string
-
-	// The width of the text area's label.
-	labelWidth int
-
 	// Styles:
-
-	// The label style.
-	labelStyle tcell.Style
 
 	// The style of the text. Background colors different from the Box's
 	// background color may lead to unwanted artefacts.
@@ -330,10 +315,6 @@ type TextArea struct {
 	// An optional function which is called when the position of the cursor or
 	// the selection has changed.
 	moved func()
-
-	// A callback function set by the Form class and called when the user leaves
-	// this form item.
-	finished func(tcell.Key)
 }
 
 // NewTextArea returns a new text area. Use [TextArea.SetText] to set the
@@ -344,7 +325,6 @@ func NewTextArea() *TextArea {
 		wrap:             true,
 		wordWrap:         true,
 		placeholderStyle: tcell.StyleDefault.Background(Styles.PrimitiveBackgroundColor).Foreground(Styles.TertiaryTextColor),
-		labelStyle:       tcell.StyleDefault.Foreground(Styles.SecondaryTextColor),
 		textStyle:        tcell.StyleDefault.Background(Styles.PrimitiveBackgroundColor).Foreground(Styles.PrimaryTextColor),
 		selectedStyle:    tcell.StyleDefault.Background(Styles.PrimaryTextColor).Foreground(Styles.PrimitiveBackgroundColor),
 		spans:            make([]textAreaSpan, 2, pieceChainMinCap), // We reserve some space to avoid reallocations right when editing starts.
@@ -714,70 +694,12 @@ func (t *TextArea) SetPlaceholder(placeholder string) *TextArea {
 	return t
 }
 
-// SetLabel sets the text to be displayed before the text area.
-func (t *TextArea) SetLabel(label string) *TextArea {
-	t.label = label
-	return t
-}
-
-// GetLabel returns the text to be displayed before the text area.
-func (t *TextArea) GetLabel() string {
-	return t.label
-}
-
-// SetLabelWidth sets the screen width of the label. A value of 0 will cause the
-// primitive to use the width of the label string.
-func (t *TextArea) SetLabelWidth(width int) *TextArea {
-	t.labelWidth = width
-	return t
-}
-
-// SetSize sets the screen size of the input element of the text area. The input
-// element is always located next to the label which is always located in the
-// top left corner. If any of the values are 0 or larger than the available
-// space, the available space will be used.
-func (t *TextArea) SetSize(rows, columns int) *TextArea {
-	t.width = columns
-	t.height = rows
-	return t
-}
-
-// GetFieldWidth returns this primitive's field width.
-func (t *TextArea) GetFieldWidth() int {
-	return t.width
-}
-
-// GetFieldHeight returns this primitive's field height.
-func (t *TextArea) GetFieldHeight() int {
-	return t.height
-}
-
-// SetDisabled sets whether or not the item is disabled / read-only.
-func (t *TextArea) SetDisabled(disabled bool) FormItem {
-	t.disabled = disabled
-	if t.finished != nil {
-		t.finished(-1)
-	}
-	return t
-}
-
 // SetMaxLength sets the maximum number of bytes allowed in the text area. A
 // value of 0 means there is no limit. If the text area currently contains more
 // bytes than this, it may violate this constraint.
 func (t *TextArea) SetMaxLength(maxLength int) *TextArea {
 	t.maxLength = maxLength
 	return t
-}
-
-// SetLabelStyle sets the style of the label.
-func (t *TextArea) SetLabelStyle(style tcell.Style) *TextArea {
-	t.labelStyle = style
-	return t
-}
-
-// GetLabelStyle returns the style of the label.
-func (t *TextArea) GetLabelStyle() tcell.Style {
-	return t.labelStyle
 }
 
 // SetTextStyle sets the style of the text. Background colors different from the
@@ -851,33 +773,6 @@ func (t *TextArea) SetChangedFunc(handler func()) *TextArea {
 // the text selection has changed.
 func (t *TextArea) SetMovedFunc(handler func()) *TextArea {
 	t.moved = handler
-	return t
-}
-
-// SetFinishedFunc sets a callback invoked when the user leaves this form item.
-func (t *TextArea) SetFinishedFunc(handler func(key tcell.Key)) FormItem {
-	t.finished = handler
-	return t
-}
-
-// Focus is called when this primitive receives focus.
-func (t *TextArea) Focus(delegate func(p Primitive)) {
-	// If we're part of a form and this item is disabled, there's nothing the
-	// user can do here so we're finished.
-	if t.finished != nil && t.disabled {
-		t.finished(-1)
-		return
-	}
-
-	t.Box.Focus(delegate)
-}
-
-// SetFormAttributes sets attributes shared by all form items.
-func (t *TextArea) SetFormAttributes(labelWidth int, labelColor, bgColor, fieldTextColor, fieldBgColor tcell.Color) FormItem {
-	t.labelWidth = labelWidth
-	t.backgroundColor = bgColor
-	t.labelStyle = t.labelStyle.Foreground(labelColor)
-	t.textStyle = tcell.StyleDefault.Foreground(fieldTextColor).Background(fieldBgColor)
 	return t
 }
 
@@ -1053,52 +948,12 @@ func (t *TextArea) Draw(screen tcell.Screen) {
 
 	// Prepare
 	x, y, width, height := t.GetInnerRect()
-	if width <= 0 || height <= 0 {
+	if width == 0 || height == 0 {
 		return // We have no space for anything.
 	}
 	columnOffset := t.columnOffset
 	if t.wrap {
 		columnOffset = 0
-	}
-
-	// Draw label.
-	_, labelBg, _ := t.labelStyle.Decompose()
-	if t.labelWidth > 0 {
-		labelWidth := t.labelWidth
-		if labelWidth > width {
-			labelWidth = width
-		}
-		printWithStyle(screen, t.label, x, y, 0, labelWidth, AlignLeft, t.labelStyle, labelBg == tcell.ColorDefault)
-		x += labelWidth
-		width -= labelWidth
-	} else {
-		_, drawnWidth, _, _ := printWithStyle(screen, t.label, x, y, 0, width, AlignLeft, t.labelStyle, labelBg == tcell.ColorDefault)
-		x += drawnWidth
-		width -= drawnWidth
-	}
-
-	// What's the space for the input element?
-	if t.width > 0 && t.width < width {
-		width = t.width
-	}
-	if t.height > 0 && t.height < height {
-		height = t.height
-	}
-	if width <= 0 {
-		return // No space left for the text area.
-	}
-
-	// Draw the input element if necessary.
-	_, bg, _ := t.textStyle.Decompose()
-	if t.disabled {
-		bg = t.backgroundColor
-	}
-	if bg != t.backgroundColor {
-		for row := 0; row < height; row++ {
-			for column := 0; column < width; column++ {
-				screen.SetContent(x+column, y+row, ' ', nil, t.textStyle)
-			}
-		}
 	}
 
 	// Show/hide the cursor at the end.
@@ -1171,9 +1026,6 @@ func (t *TextArea) Draw(screen tcell.Screen) {
 			fromRow > line ||
 			fromRow == line && fromColumn > posX {
 			style = t.textStyle
-			if t.disabled {
-				style = style.Background(t.backgroundColor)
-			}
 		}
 
 		// Draw character.
@@ -1201,7 +1053,7 @@ func (t *TextArea) Draw(screen tcell.Screen) {
 func (t *TextArea) drawPlaceholder(screen tcell.Screen, x, y, width, height int) {
 	posX, posY := x, y
 	lastLineBreak, lastGraphemeBreak := x, x // Screen positions of the last possible line/grapheme break.
-	iterateString(t.placeholder, func(main rune, comb []rune, textPos, textWidth, screenPos, screenWidth, boundaries int) bool {
+	biterateString(t.placeholder, func(main rune, comb []rune, textPos, textWidth, screenPos, screenWidth, boundaries int) bool {
 		if posX+screenWidth > x+width {
 			// This character doesn't fit. Break over to the next line.
 			// Perform word wrapping first by copying the last word over to
@@ -1840,10 +1692,6 @@ func (t *TextArea) getSelectedText() string {
 // InputHandler returns the handler for this primitive.
 func (t *TextArea) InputHandler() func(event *tcell.EventKey, setFocus func(p Primitive)) {
 	return t.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p Primitive)) {
-		if t.disabled {
-			return
-		}
-
 		// All actions except a few specific ones are "other" actions.
 		newLastAction := taActionOther
 		defer func() {
@@ -2009,12 +1857,6 @@ func (t *TextArea) InputHandler() func(event *tcell.EventKey, setFocus func(p Pr
 			t.selectionStart = t.cursor
 			newLastAction = taActionTypeSpace
 		case tcell.KeyTab: // Insert a tab character. It will be rendered as TabSize spaces.
-			// But forwarding takes precedence.
-			if t.finished != nil {
-				t.finished(key)
-				return
-			}
-
 			from, to, row := t.getSelection()
 			t.cursor.pos = t.replace(from, to, "\t", t.lastAction == taActionTypeSpace)
 			t.cursor.row = -1
@@ -2022,11 +1864,6 @@ func (t *TextArea) InputHandler() func(event *tcell.EventKey, setFocus func(p Pr
 			t.findCursor(true, row)
 			t.selectionStart = t.cursor
 			newLastAction = taActionTypeSpace
-		case tcell.KeyBacktab, tcell.KeyEscape: // Only used in forms.
-			if t.finished != nil {
-				t.finished(key)
-				return
-			}
 		case tcell.KeyRune:
 			if event.Modifiers()&tcell.ModAlt > 0 {
 				// We accept some Alt- key combinations.
@@ -2228,13 +2065,66 @@ func (t *TextArea) InputHandler() func(event *tcell.EventKey, setFocus func(p Pr
 	})
 }
 
+// THIS FUNCTION WILL BE REMOVED ONCE WE DEEM THE TEXT AREA STABLE! DO NOT USE!
+func (t *TextArea) Dump() string {
+	var buf strings.Builder
+
+	// Dump spans.
+	buf.WriteString("Spans:\n\n")
+	index := 0
+	for index >= 0 {
+		span := t.spans[index]
+		var text string
+		if span.length < 0 {
+			text = t.initialText[span.offset : span.offset-span.length]
+		} else {
+			text = t.editText.String()[span.offset : span.offset+span.length]
+		}
+		if len(text) > 9 {
+			text = fmt.Sprintf("%s...%s", text[:3], text[len(text)-3:])
+		}
+		fmt.Fprintf(&buf, `[blue]%d:[white]{[yellow]%d[white] %q [red]%d[white]} `, index, span.previous, text, span.next)
+		index = span.next
+	}
+
+	// Dump undo stack.
+	buf.WriteString("\n\nUndo stack:\n\n")
+	for undoIndex, undo := range t.undoStack {
+		if t.nextUndo == undoIndex {
+			buf.WriteString("^^^^^^\n")
+		}
+		fmt.Fprintf(&buf, `[yellow]%d[white]>[blue]%d[yellow] `, undo.before, undo.originalBefore)
+		index := undo.before
+		for {
+			if index == undo.originalAfter {
+				index = undo.after
+			}
+			span := t.spans[index]
+			var text string
+			if span.length < 0 {
+				text = t.initialText[span.offset : span.offset-span.length]
+			} else {
+				text = t.editText.String()[span.offset : span.offset+span.length]
+			}
+			if len(text) > 9 {
+				text = fmt.Sprintf("%s...%s", text[:3], text[len(text)-3:])
+			}
+			fmt.Fprintf(&buf, `[blue]%d:[white]{[yellow]%d[white] %q [red]%d[white]} `, index, span.previous, text, span.next)
+			if index == undo.after {
+				break
+			}
+			index = span.next
+		}
+		fmt.Fprintf(&buf, "[yellow]%d[white]>[blue]%d[yellow]", undo.after, undo.originalAfter)
+		fmt.Fprintf(&buf, "  %d\n", undo.pos)
+	}
+
+	return buf.String()
+}
+
 // MouseHandler returns the mouse handler for this primitive.
 func (t *TextArea) MouseHandler() func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive) {
 	return t.WrapMouseHandler(func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive) {
-		if t.disabled {
-			return false, nil
-		}
-
 		x, y := event.Position()
 		rectX, rectY, _, _ := t.GetInnerRect()
 		if !t.InRect(x, y) {
@@ -2252,11 +2142,7 @@ func (t *TextArea) MouseHandler() func(action MouseAction, event *tcell.EventMou
 		}
 
 		// Turn mouse coordinates into text coordinates.
-		labelWidth := t.labelWidth
-		if labelWidth == 0 && t.label != "" {
-			labelWidth = TaggedStringWidth(t.label)
-		}
-		column := x - rectX - labelWidth
+		column := x - rectX
 		row := y - rectY
 		if !t.wrap {
 			column += t.columnOffset

@@ -1,13 +1,22 @@
 package tview
 
-import "github.com/gdamore/tcell/v2"
+import (
+	tcell "github.com/gdamore/tcell/v2"
+)
 
 // Primitive is the top-most interface for all graphical primitives.
-type Primitive interface {
+type BasicPrimitive interface {
 	// Draw draws this primitive onto the screen. Implementers can call the
 	// screen's ShowCursor() function but should only do so when they have focus.
 	// (They will need to keep track of this themselves.)
-	Draw(screen tcell.Screen)
+	Draw(screen tcell.Screen) 
+  DrawBorder(borderVisible bool, background tcell.Style, screen tcell.Screen) bool
+
+	// Sets whether the primitive should be drawn onto the screen.
+	SetVisible(bool)
+
+	// Gets whether the primitive should be drawn onto the screen.
+	IsVisible() bool
 
 	// GetRect returns the current position of the primitive, x, y, width, and
 	// height.
@@ -15,6 +24,14 @@ type Primitive interface {
 
 	// SetRect sets a new position of the primitive.
 	SetRect(x, y, width, height int)
+
+	// SetParent defines which component this primitive is currently being
+	// treated as a child of. This should never be called manually.
+	SetParent(Primitive)
+
+	// GetParent returns the current parent or nil if the parent hasn't been
+	// set yet.
+	GetParent() Primitive
 
 	// InputHandler returns a handler which receives key events when it has focus.
 	// It is called by the Application class.
@@ -32,27 +49,75 @@ type Primitive interface {
 	// The Box class provides functionality to intercept keyboard input. If you
 	// subclass from Box, it is recommended that you wrap your handler using
 	// Box.WrapInputHandler() so you inherit that functionality.
+	// InputHandler() func(*tcell.EventKey, func(p Primitive)) 
+	HasFocus() bool
 	InputHandler() func(event *tcell.EventKey, setFocus func(p Primitive))
+	MouseHandler() func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive)
+
+	// OnPaste is called when a bracketed paste is finished.
+	OnPaste([]rune)
 
 	// Focus is called by the application when the primitive receives focus.
 	// Implementers may call delegate() to pass the focus on to another primitive.
 	Focus(delegate func(p Primitive))
 
-	// HasFocus determines if the primitive has focus. This function must return
-	// true also if one of this primitive's child elements has focus.
-	HasFocus() bool
-
 	// Blur is called by the application when the primitive loses focus.
 	Blur()
 
-	// MouseHandler returns a handler which receives mouse events.
-	// It is called by the Application class.
-	//
-	// A value of nil may also be returned to stop the downward propagation of
-	// mouse events.
-	//
-	// The Box class provides functionality to intercept mouse events. If you
-	// subclass from Box, it is recommended that you wrap your handler using
-	// Box.WrapMouseHandler() so you inherit that functionality.
-	MouseHandler() func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive)
+	// SetOnFocus sets the handler that gets called when Focus() gets called.
+	SetOnFocus(handler func())
+
+	// SetOnBlur sets the handler that gets called when Blur() gets called.
+	SetOnBlur(handler func())
+
+	// GetFocusable returns the item's Focusable.
+	GetFocusable() Focusable
+
+	// NextFocusableComponent decides which component should receive focus next.
+	// If nil is returned, the focus is retained.
+	NextFocusableComponent(FocusDirection) Primitive
 }
+type Primitive interface {
+  BasicPrimitive
+  SetEventedFunc(f EventedFunc) *Box
+  GetEventedFunc() EventedFunc
+Event(f EventerFunc)
+}
+
+type AnimatedPrimitive interface {
+  Primitive
+  SetAnimating(bool)
+  GetAnimating() bool
+}
+type PageChangeType int
+
+const(
+  Front PageChangeType = iota
+  Back
+  Refresh
+  Removed
+  Drawn
+ Focused 
+)
+
+type Paged interface {
+  Name() string
+  Shown(*Pages)
+  Hidden(*Pages)
+  Changed(*Page, *Pages, PageChangeType)
+}
+
+type EventerFunc func(f EventedFunc)
+type EventedFunc func(event string, p Primitive, i ...any)
+type InputHandlerFunc func(*tcell.EventKey, func(p Primitive)) 
+
+// FocusDirection decides in what direction the focus should travel relative
+// to the currently focused component.
+type FocusDirection int
+
+const (
+	Up FocusDirection = iota
+	Down
+	Left
+	Right
+)

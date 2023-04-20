@@ -49,9 +49,6 @@ const (
 type InputField struct {
 	*Box
 
-	// Whether or not this input field is disabled/read-only.
-	disabled bool
-
 	// The text that was entered.
 	text string
 
@@ -280,15 +277,6 @@ func (i *InputField) GetFieldHeight() int {
 	return 1
 }
 
-// SetDisabled sets whether or not the item is disabled / read-only.
-func (i *InputField) SetDisabled(disabled bool) FormItem {
-	i.disabled = disabled
-	if i.finished != nil {
-		i.finished(-1)
-	}
-	return i
-}
-
 // SetMaskCharacter sets a character that masks user input on a screen. A value
 // of 0 disables masking.
 func (i *InputField) SetMaskCharacter(mask rune) *InputField {
@@ -307,7 +295,10 @@ func (i *InputField) SetAutocompleteFunc(callback func(currentText string) (entr
 	i.Autocomplete()
 	return i
 }
-
+// AutocompleteList returns list view
+func (i *InputField) AutocompleteList() *List {
+  return i.autocompleteList
+}
 // SetAutocompletedFunc sets a callback function which is invoked when the user
 // selects an entry from the autocomplete drop-down list. The function is passed
 // the text of the selected entry (stripped of any color tags), the index of the
@@ -415,18 +406,6 @@ func (i *InputField) SetFinishedFunc(handler func(key tcell.Key)) FormItem {
 	return i
 }
 
-// Focus is called when this primitive receives focus.
-func (i *InputField) Focus(delegate func(p Primitive)) {
-	// If we're part of a form and this item is disabled, there's nothing the
-	// user can do here so we're finished.
-	if i.finished != nil && i.disabled {
-		i.finished(-1)
-		return
-	}
-
-	i.Box.Focus(delegate)
-}
-
 // Blur is called when this primitive loses focus.
 func (i *InputField) Blur() {
 	i.Box.Blur()
@@ -474,9 +453,6 @@ func (i *InputField) Draw(screen tcell.Screen) {
 	if rightLimit-x < fieldWidth {
 		fieldWidth = rightLimit - x
 	}
-	if i.disabled {
-		inputStyle = inputStyle.Background(i.backgroundColor)
-	}
 	if inputBg != tcell.ColorDefault {
 		for index := 0; index < fieldWidth; index++ {
 			screen.SetContent(x+index, y, ' ', nil, inputStyle)
@@ -494,11 +470,11 @@ func (i *InputField) Draw(screen tcell.Screen) {
 		if i.maskCharacter > 0 {
 			text = strings.Repeat(string(i.maskCharacter), utf8.RuneCountInString(i.text))
 		}
-		if fieldWidth >= uniseg.StringWidth(text) {
+		if fieldWidth >= stringWidth(text) {
 			// We have enough space for the full text.
 			printWithStyle(screen, Escape(text), x, y, 0, fieldWidth, AlignLeft, i.fieldStyle, true)
 			i.offset = 0
-			iterateString(text, func(main rune, comb []rune, textPos, textWidth, screenPos, screenWidth, boundaries int) bool {
+			biterateString(text, func(main rune, comb []rune, textPos, textWidth, screenPos, screenWidth, boundaries int) bool {
 				if textPos >= i.cursorPos {
 					return true
 				}
@@ -520,7 +496,7 @@ func (i *InputField) Draw(screen tcell.Screen) {
 				shiftLeft = subWidth - fieldWidth + 1
 			}
 			currentOffset := i.offset
-			iterateString(text, func(main rune, comb []rune, textPos, textWidth, screenPos, screenWidth, boundaries int) bool {
+			biterateString(text, func(main rune, comb []rune, textPos, textWidth, screenPos, screenWidth, boundaries int) bool {
 				if textPos >= currentOffset {
 					if shiftLeft > 0 {
 						i.offset = textPos + textWidth
@@ -579,10 +555,6 @@ func (i *InputField) Draw(screen tcell.Screen) {
 // InputHandler returns the handler for this primitive.
 func (i *InputField) InputHandler() func(event *tcell.EventKey, setFocus func(p Primitive)) {
 	return i.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p Primitive)) {
-		if i.disabled {
-			return
-		}
-
 		// Trigger changed events.
 		currentText := i.text
 		defer func() {
@@ -604,7 +576,7 @@ func (i *InputField) InputHandler() func(event *tcell.EventKey, setFocus func(p 
 			})
 		}
 		moveRight := func() {
-			iterateString(i.text[i.cursorPos:], func(main rune, comb []rune, textPos, textWidth, screenPos, screenWidth, boundaries int) bool {
+			biterateString(i.text[i.cursorPos:], func(main rune, comb []rune, textPos, textWidth, screenPos, screenWidth, boundaries int) bool {
 				i.cursorPos += textWidth
 				return true
 			})
@@ -727,7 +699,7 @@ func (i *InputField) InputHandler() func(event *tcell.EventKey, setFocus func(p 
 				i.offset = 0
 			}
 		case tcell.KeyDelete, tcell.KeyCtrlD: // Delete character after the cursor.
-			iterateString(i.text[i.cursorPos:], func(main rune, comb []rune, textPos, textWidth, screenPos, screenWidth, boundaries int) bool {
+			biterateString(i.text[i.cursorPos:], func(main rune, comb []rune, textPos, textWidth, screenPos, screenWidth, boundaries int) bool {
 				i.text = i.text[:i.cursorPos] + i.text[i.cursorPos+textWidth:]
 				return true
 			})
@@ -764,10 +736,6 @@ func (i *InputField) InputHandler() func(event *tcell.EventKey, setFocus func(p 
 // MouseHandler returns the mouse handler for this primitive.
 func (i *InputField) MouseHandler() func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive) {
 	return i.WrapMouseHandler(func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive) {
-		if i.disabled {
-			return false, nil
-		}
-
 		currentText := i.GetText()
 		defer func() {
 			if i.GetText() != currentText {
@@ -815,7 +783,7 @@ func (i *InputField) MouseHandler() func(action MouseAction, event *tcell.EventM
 			} else if action == MouseLeftClick {
 				// Determine where to place the cursor.
 				if x >= i.fieldX {
-					if !iterateString(i.text[i.offset:], func(main rune, comb []rune, textPos int, textWidth int, screenPos int, screenWidth, boundaries int) bool {
+					if !biterateString(i.text[i.offset:], func(main rune, comb []rune, textPos int, textWidth int, screenPos int, screenWidth, boundaries int) bool {
 						if x-i.fieldX < screenPos+screenWidth {
 							i.cursorPos = textPos + i.offset
 							return true

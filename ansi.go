@@ -143,6 +143,10 @@ func (a *ansi) Write(text []byte) (int, error) {
 							if !strings.ContainsRune(a.attributes, 'l') {
 								a.attributes += "l"
 							}
+						case "7", "07":
+							if !strings.ContainsRune(a.attributes, 'r') {
+								a.attributes += "r"
+							}
 						case "22":
 							if i := strings.IndexRune(a.attributes, 'b'); i >= 0 {
 								a.attributes = a.attributes[:i] + a.attributes[i+1:]
@@ -177,33 +181,36 @@ func (a *ansi) Write(text []byte) (int, error) {
 						case "38", "48":
 							var color string
 							if len(fields) > index+1 {
-								if fields[index+1] == "5" && len(fields) > index+2 { // 8-bit colors.
-									colorNumber, _ := strconv.Atoi(fields[index+2])
-									if colorNumber <= 15 {
-										color = lookupColor(colorNumber)
-									} else if colorNumber <= 231 {
-										red := (colorNumber - 16) / 36
-										green := ((colorNumber - 16) / 6) % 6
-										blue := (colorNumber - 16) % 6
-										color = fmt.Sprintf("#%02x%02x%02x", 255*red/5, 255*green/5, 255*blue/5)
-									} else if colorNumber <= 255 {
-										grey := 255 * (colorNumber - 232) / 23
-										color = fmt.Sprintf("#%02x%02x%02x", grey, grey, grey)
-									}
-								} else if fields[index+1] == "2" && len(fields) > index+4 { // 24-bit colors.
-									red, _ := strconv.Atoi(fields[index+2])
-									green, _ := strconv.Atoi(fields[index+3])
-									blue, _ := strconv.Atoi(fields[index+4])
-									color = fmt.Sprintf("#%02x%02x%02x", red, green, blue)
+								// 8-bit colors.
+								// 24-bit colors.
+								color = a.newMethod(fields, index, color, lookupColor)
+                if len(color) > 0 {
+                  if field == "38" {
+                    foreground = color
+                  } else {
+                    background = color
+                  }
+                }
+								if len(fields) > index+5 {
+                  field = fields[index+5]
+								color = a.newMethod(fields, index+5, color, lookupColor)
+                if len(color) > 0 {
+                  if field == "38" {
+                    foreground = color
+                  } else {
+                    background = color
+                  }
+                }
+
 								}
 							}
-							if len(color) > 0 {
-								if field == "38" {
-									foreground = color
-								} else {
-									background = color
-								}
-							}
+							// if len(color) > 0 {
+							// 	if field == "38" {
+							// 		foreground = color
+							// 	} else {
+							// 		background = color
+							// 	}
+							// }
 							break FieldLoop
 						}
 					}
@@ -246,6 +253,29 @@ func (a *ansi) Write(text []byte) (int, error) {
 		return int(n), err
 	}
 	return len(text), nil
+}
+
+func (*ansi) newMethod(fields []string, index int, color string, lookupColor func(colorNumber int) string) string {
+	if fields[index+1] == "5" && len(fields) > index+2 {
+		colorNumber, _ := strconv.Atoi(fields[index+2])
+		if colorNumber <= 15 {
+			color = lookupColor(colorNumber)
+		} else if colorNumber <= 231 {
+			red := (colorNumber - 16) / 36
+			green := ((colorNumber - 16) / 6) % 6
+			blue := (colorNumber - 16) % 6
+			color = fmt.Sprintf("#%02x%02x%02x", 255*red/5, 255*green/5, 255*blue/5)
+		} else if colorNumber <= 255 {
+			grey := 255 * (colorNumber - 232) / 23
+			color = fmt.Sprintf("#%02x%02x%02x", grey, grey, grey)
+		}
+	} else if fields[index+1] == "2" && len(fields) > index+4 {
+		red, _ := strconv.Atoi(fields[index+2])
+		green, _ := strconv.Atoi(fields[index+3])
+		blue, _ := strconv.Atoi(fields[index+4])
+		color = fmt.Sprintf("#%02x%02x%02x", red, green, blue)
+	}
+	return color
 }
 
 // TranslateANSI replaces ANSI escape sequences found in the provided string

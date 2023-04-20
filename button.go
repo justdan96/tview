@@ -10,20 +10,17 @@ import (
 type Button struct {
 	*Box
 
-	// If set to true, the button cannot be activated.
-	disabled bool
+	// The text to be displayed before the input area.
+	label string
 
-	// The text to be displayed inside the button.
-	text string
+	// The label color.
+	labelColor tcell.Color
 
-	// The button's style (when deactivated).
-	style tcell.Style
+	// The label color when the button is in focus.
+	labelColorActivated tcell.Color
 
-	// The button's style (when activated).
-	activatedStyle tcell.Style
-
-	// The button's style (when disabled).
-	disabledStyle tcell.Style
+	// The background color when the button is in focus.
+	backgroundColorActivated tcell.Color
 
 	// An optional function which is called when the button was selected.
 	selected func()
@@ -36,79 +33,46 @@ type Button struct {
 
 // NewButton returns a new input field.
 func NewButton(label string) *Button {
-	box := NewBox()
+	box := NewBox().SetBackgroundColor(Styles.ContrastBackgroundColor)
 	box.SetRect(0, 0, TaggedStringWidth(label)+4, 1)
 	return &Button{
-		Box:            box,
-		text:           label,
-		style:          tcell.StyleDefault.Background(Styles.ContrastBackgroundColor).Foreground(Styles.PrimaryTextColor),
-		activatedStyle: tcell.StyleDefault.Background(Styles.PrimaryTextColor).Foreground(Styles.InverseTextColor),
-		disabledStyle:  tcell.StyleDefault.Background(Styles.ContrastBackgroundColor).Foreground(Styles.ContrastSecondaryTextColor),
+		Box:                      box,
+		label:                    label,
+		labelColor:               Styles.PrimaryTextColor,
+		labelColorActivated:      Styles.InverseTextColor,
+		backgroundColorActivated: Styles.PrimaryTextColor,
 	}
 }
 
 // SetLabel sets the button text.
 func (b *Button) SetLabel(label string) *Button {
-	b.text = label
+	b.label = label
 	return b
 }
 
 // GetLabel returns the button text.
 func (b *Button) GetLabel() string {
-	return b.text
+	return b.label
 }
 
 // SetLabelColor sets the color of the button text.
 func (b *Button) SetLabelColor(color tcell.Color) *Button {
-	b.style = b.style.Foreground(color)
-	return b
-}
-
-// SetStyle sets the style of the button used when it is not focused.
-func (b *Button) SetStyle(style tcell.Style) *Button {
-	b.style = style
+	b.labelColor = color
 	return b
 }
 
 // SetLabelColorActivated sets the color of the button text when the button is
 // in focus.
 func (b *Button) SetLabelColorActivated(color tcell.Color) *Button {
-	b.activatedStyle = b.activatedStyle.Foreground(color)
+	b.labelColorActivated = color
 	return b
 }
 
 // SetBackgroundColorActivated sets the background color of the button text when
 // the button is in focus.
 func (b *Button) SetBackgroundColorActivated(color tcell.Color) *Button {
-	b.activatedStyle = b.activatedStyle.Background(color)
+	b.backgroundColorActivated = color
 	return b
-}
-
-// SetActivatedStyle sets the style of the button used when it is focused.
-func (b *Button) SetActivatedStyle(style tcell.Style) *Button {
-	b.activatedStyle = style
-	return b
-}
-
-// SetDisabledStyle sets the style of the button used when it is disabled.
-func (b *Button) SetDisabledStyle(style tcell.Style) *Button {
-	b.disabledStyle = style
-	return b
-}
-
-// SetDisabled sets whether or not the button is disabled. Disabled buttons
-// cannot be activated.
-//
-// If the button is part of a form, you should set focus to the form itself
-// after calling this function to set focus to the next non-disabled form item.
-func (b *Button) SetDisabled(disabled bool) *Button {
-	b.disabled = disabled
-	return b
-}
-
-// IsDisabled returns whether or not the button is disabled.
-func (b *Button) IsDisabled() bool {
-	return b.disabled
 }
 
 // SetSelectedFunc sets a handler which is called when the button was selected.
@@ -132,40 +96,33 @@ func (b *Button) SetExitFunc(handler func(key tcell.Key)) *Button {
 // Draw draws this primitive onto the screen.
 func (b *Button) Draw(screen tcell.Screen) {
 	// Draw the box.
-	style := b.style
-	if b.disabled {
-		style = b.disabledStyle
-	}
-	_, backgroundColor, _ := style.Decompose()
-	if b.HasFocus() && !b.disabled {
-		style = b.activatedStyle
-		_, backgroundColor, _ = style.Decompose()
-
-		// Highlight button for one drawing cycle.
-		borderColor := b.GetBorderColor()
-		b.SetBorderColor(backgroundColor)
+	borderColor := b.GetBorderColor()
+	backgroundColor := b.GetBackgroundColor()
+	if b.HasFocus() {
+		b.SetBackgroundColor(b.backgroundColorActivated)
+		b.SetBorderColor(b.labelColorActivated)
 		defer func() {
 			b.SetBorderColor(borderColor)
 		}()
 	}
-	b.SetBackgroundColor(backgroundColor)
 	b.Box.DrawForSubclass(screen, b)
+	b.backgroundColor = backgroundColor
 
 	// Draw label.
 	x, y, width, height := b.GetInnerRect()
 	if width > 0 && height > 0 {
 		y = y + height/2
-		printWithStyle(screen, b.text, x, y, 0, width, AlignCenter, style, true)
+		labelColor := b.labelColor
+		if b.HasFocus() {
+			labelColor = b.labelColorActivated
+		}
+		Print(screen, b.label, x, y, width, AlignCenter, labelColor)
 	}
 }
 
 // InputHandler returns the handler for this primitive.
 func (b *Button) InputHandler() func(event *tcell.EventKey, setFocus func(p Primitive)) {
 	return b.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p Primitive)) {
-		if b.disabled {
-			return
-		}
-
 		// Process key event.
 		switch key := event.Key(); key {
 		case tcell.KeyEnter: // Selected.
@@ -183,19 +140,13 @@ func (b *Button) InputHandler() func(event *tcell.EventKey, setFocus func(p Prim
 // MouseHandler returns the mouse handler for this primitive.
 func (b *Button) MouseHandler() func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive) {
 	return b.WrapMouseHandler(func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive) {
-		if b.disabled {
-			return false, nil
-		}
-
 		if !b.InRect(event.Position()) {
 			return false, nil
 		}
 
 		// Process mouse event.
-		if action == MouseLeftDown {
+		if action == MouseLeftClick {
 			setFocus(b)
-			consumed = true
-		} else if action == MouseLeftClick {
 			if b.selected != nil {
 				b.selected()
 			}

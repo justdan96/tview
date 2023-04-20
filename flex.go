@@ -1,6 +1,7 @@
 package tview
 
 import (
+	// "github.com/digitallyserviced/coolors/coolor/splits"
 	"github.com/gdamore/tcell/v2"
 )
 
@@ -40,6 +41,7 @@ type Flex struct {
 	fullScreen bool
 }
 
+
 // NewFlex returns a new flexbox layout container with no primitives and its
 // direction set to FlexColumn. To add primitives to this layout, see AddItem().
 // To change the direction, see SetDirection().
@@ -49,7 +51,7 @@ type Flex struct {
 // background before any items are drawn, set it to a box with the desired
 // color:
 //
-//   flex.Box = NewBox()
+//	flex.Box = NewBox()
 func NewFlex() *Flex {
 	f := &Flex{
 		direction: FlexColumn,
@@ -89,8 +91,20 @@ func (f *Flex) SetFullScreen(fullScreen bool) *Flex {
 //
 // You can provide a nil value for the primitive. This will still consume screen
 // space but nothing will be drawn.
-func (f *Flex) AddItem(item Primitive, fixedSize, proportion int, focus bool) *Flex {
-	f.items = append(f.items, &flexItem{Item: item, FixedSize: fixedSize, Proportion: proportion, Focus: focus})
+func (f *Flex) AddItem(
+	item Primitive,
+	fixedSize, proportion int,
+	focus bool,
+) *Flex {
+	f.items = append(
+		f.items,
+		&flexItem{
+			Item:       item,
+			FixedSize:  fixedSize,
+			Proportion: proportion,
+			Focus:      focus,
+		},
+	)
 	return f
 }
 
@@ -114,6 +128,21 @@ func (f *Flex) GetItemCount() int {
 // first primitive in this container.
 //
 // This function will panic for out of range indices.
+func (f *Flex) SetItem(index int, p Primitive, fixed, prop int) *flexItem {
+	if index < 0 || index > len(f.items)-1 {
+		return nil
+	}
+	if p != nil {
+		f.items[index].Item = p
+		f.ResizeItem(p, fixed, prop)
+	}
+	return f.items[index]
+}
+
+// GetItem returns the primitive at the given index, starting with 0 for the
+// first primitive in this container.
+//
+// This function will panic for out of range indices.
 func (f *Flex) GetItem(index int) Primitive {
 	return f.items[index].Item
 }
@@ -127,6 +156,18 @@ func (f *Flex) Clear() *Flex {
 // ResizeItem sets a new size for the item(s) with the given primitive. If there
 // are multiple Flex items with the same primitive, they will all receive the
 // same size. For details regarding the size parameters, see AddItem().
+func (f *Flex) ResizeAt(idx, fixedSize, proportion int) *Flex {
+  item := f.items[idx]
+  item.FixedSize = fixedSize
+  item.Proportion = proportion
+	// for _, item := range f.items {
+	// 	if item.Item == p {
+	// 		item.FixedSize = fixedSize
+	// 		item.Proportion = proportion
+	// 	}
+	// }
+	return f
+}
 func (f *Flex) ResizeItem(p Primitive, fixedSize, proportion int) *Flex {
 	for _, item := range f.items {
 		if item.Item == p {
@@ -222,36 +263,40 @@ func (f *Flex) HasFocus() bool {
 
 // MouseHandler returns the mouse handler for this primitive.
 func (f *Flex) MouseHandler() func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive) {
-	return f.WrapMouseHandler(func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive) {
-		if !f.InRect(event.Position()) {
-			return false, nil
-		}
-
-		// Pass mouse events along to the first child item that takes it.
-		for _, item := range f.items {
-			if item.Item == nil {
-				continue
+	return f.WrapMouseHandler(
+		func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive) {
+			if !f.InRect(event.Position()) {
+				return false, nil
 			}
-			consumed, capture = item.Item.MouseHandler()(action, event, setFocus)
-			if consumed {
-				return
-			}
-		}
 
-		return
-	})
+			// Pass mouse events along to the first child item that takes it.
+			for _, item := range f.items {
+				if item.Item == nil {
+					continue
+				}
+				consumed, capture = item.Item.MouseHandler()(action, event, setFocus)
+				if consumed {
+					return
+				}
+			}
+
+			return
+		},
+	)
 }
 
 // InputHandler returns the handler for this primitive.
 func (f *Flex) InputHandler() func(event *tcell.EventKey, setFocus func(p Primitive)) {
-	return f.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p Primitive)) {
-		for _, item := range f.items {
-			if item.Item != nil && item.Item.HasFocus() {
-				if handler := item.Item.InputHandler(); handler != nil {
-					handler(event, setFocus)
-					return
+	return f.WrapInputHandler(
+		func(event *tcell.EventKey, setFocus func(p Primitive)) {
+			for _, item := range f.items {
+				if item.Item != nil && item.Item.HasFocus() {
+					if handler := item.Item.InputHandler(); handler != nil {
+						handler(event, setFocus)
+						return
+					}
 				}
 			}
-		}
-	})
+		},
+	)
 }

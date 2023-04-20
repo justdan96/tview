@@ -1,18 +1,19 @@
 package tview
 
 import (
-	"github.com/gdamore/tcell/v2"
+	"math"
+
+	tcell "github.com/gdamore/tcell/v2"
 )
 
-// Box implements the Primitive interface with an empty background and optional
-// elements such as a border and a title. Box itself does not hold any content
-// but serves as the superclass of all other primitives. Subclasses add their
-// own content, typically (but not necessarily) keeping their content within the
-// box's rectangle.
+// Box implements Primitive with a background and optional elements such as a
+// border and a title. Most subclasses keep their content contained in the box
+// but don't necessarily have to.
 //
-// Box provides a number of utility functions available to all primitives.
+// Note that all classes which subclass from Box will also have access to its
+// functions.
 //
-// See https://github.com/rivo/tview/wiki/Box for an example.
+// See https://github.com/Bios-Marcel/cordless/tview/wiki/Box for an example.
 type Box struct {
 	// The position of the rect.
 	x, y, width, height int
@@ -23,18 +24,32 @@ type Box struct {
 	// Border padding.
 	paddingTop, paddingBottom, paddingLeft, paddingRight int
 
+	// Border Size
+	borderTop, borderBottom, borderLeft, borderRight bool
+
 	// The box's background color.
 	backgroundColor tcell.Color
 
-	// If set to true, the background of this box is not cleared while drawing.
-	dontClear bool
+	// Reverse video.
+	reverse bool
 
 	// Whether or not a border is drawn, reducing the box's space for content by
 	// two in width and height.
-	border bool
+	border        bool
+	borderVisible bool
+	// The color of the border.
+	borderColor tcell.Color
 
-	// The border style.
-	borderStyle tcell.Style
+	// The color of the border when the box has focus.
+	borderFocusColor tcell.Color
+
+	borderBlinking bool
+	borderStyles   *BorderStyle
+
+	// If set to true, the text view will show down and up arrows if there is
+	// content out of sight. While box doesn't implement scrolling, this is
+	// an abstraction for other components
+	indicateOverflow bool
 
 	// The title. Only visible if there is a border, too.
 	title string
@@ -45,27 +60,41 @@ type Box struct {
 	// The alignment of the title.
 	titleAlign int
 
-	// Whether or not this box has focus. This is typically ignored for
-	// container primitives (e.g. Flex, Grid, Pages), as they will delegate
-	// focus to their children.
+	// Provides a way to find out if this box has focus. We always go through
+	// this interface because it may be overridden by implementing classes.
+	focus Focusable
+
+	// Whether or not this box has focus.
 	hasFocus bool
 
-	// Optional callback functions invoked when the primitive receives or loses
-	// focus.
-	focus, blur func()
+	visible bool
 
 	// An optional capture function which receives a key event and returns the
 	// event to be forwarded to the primitive's default input handler (nil if
 	// nothing should be forwarded).
 	inputCapture func(event *tcell.EventKey) *tcell.EventKey
 
+	mouseHandler func(event *tcell.EventMouse) bool
+	mouseCapture func(action MouseAction, event *tcell.EventMouse) (MouseAction, *tcell.EventMouse)
+
 	// An optional function which is called before the box is drawn.
 	draw func(screen tcell.Screen, x, y, width, height int) (int, int, int, int)
+  evented  EventedFunc
 
-	// An optional capture function which receives a mouse event and returns the
-	// event to be forwarded to the primitive's default mouse event handler (at
-	// least one nil if nothing should be forwarded).
-	mouseCapture func(action MouseAction, event *tcell.EventMouse) (MouseAction, *tcell.EventMouse)
+	// Handler that gets called when this component receives focus.
+	onFocus func()
+
+	// Handler that gets called when this component loses focus.
+	onBlur      func()
+	borderStyle tcell.Style
+	dontClear   bool
+
+	nextFocusableComponents map[FocusDirection][]Primitive
+	parent                  Primitive
+
+	onPaste      func([]rune)
+	focusManager *FocusManager
+	animating    bool
 }
 
 // NewBox returns a Box without a border.
@@ -75,10 +104,37 @@ func NewBox() *Box {
 		height:          10,
 		innerX:          -1, // Mark as uninitialized.
 		backgroundColor: Styles.PrimitiveBackgroundColor,
-		borderStyle:     tcell.StyleDefault.Foreground(Styles.BorderColor).Background(Styles.PrimitiveBackgroundColor),
-		titleColor:      Styles.TitleColor,
-		titleAlign:      AlignCenter,
+		borderStyle: tcell.StyleDefault.Foreground(Styles.BorderColor).
+			Background(Styles.PrimitiveBackgroundColor),
+		borderColor:             Styles.BorderColor,
+		borderFocusColor:        Styles.BorderFocusColor,
+		titleColor:              Styles.TitleColor,
+		titleAlign:              AlignCenter,
+		borderTop:               true,
+		borderBottom:            true,
+		borderLeft:              true,
+		borderRight:             true,
+		visible:                 true,
+		borderVisible:           true,
+		borderStyles:            &Borders,
+		animating:               false,
+		nextFocusableComponents: make(map[FocusDirection][]Primitive),
 	}
+
+	b.focus = b
+	return b
+}
+
+func (b *Box) GetFocusManager() *FocusManager {
+	return b.focusManager
+}
+
+func (b *Box) SetFocusManager(fm *FocusManager) *Box {
+	return b
+}
+
+func (b *Box) SetDontClear(dontClear bool) *Box {
+	b.dontClear = dontClear
 	return b
 }
 
@@ -88,10 +144,30 @@ func (b *Box) SetBorderPadding(top, bottom, left, right int) *Box {
 	return b
 }
 
+// SetVisible sets whether the Box should be drawn onto the screen.
+func (b *Box) SetVisible(visible bool) {
+	b.visible = visible
+}
+
+// IsVisible gets whether the Box should be drawn onto the screen.
+func (b *Box) IsVisible() bool {
+	return b.visible
+}
+
 // GetRect returns the current position of the rectangle, x, y, width, and
 // height.
 func (b *Box) GetRect() (int, int, int, int) {
 	return b.x, b.y, b.width, b.height
+}
+
+// SetOnFocus sets the handler that gets called when Focus() gets called.
+func (b *Box) SetOnFocus(handler func()) {
+	b.onFocus = handler
+}
+
+// SetOnBlur sets the handler that gets called when Blur() gets called.
+func (b *Box) SetOnBlur(handler func()) {
+	b.onBlur = handler
 }
 
 // GetInnerRect returns the position of the inner rectangle (x, y, width,
@@ -103,10 +179,10 @@ func (b *Box) GetInnerRect() (int, int, int, int) {
 	}
 	x, y, width, height := b.GetRect()
 	if b.border {
-		x++
-		y++
-		width -= 2
-		height -= 2
+		x += boolToInt(b.borderLeft)
+		y += boolToInt(b.borderTop)
+		width -= boolToInt(b.borderLeft) + boolToInt(b.borderRight)
+		height -= boolToInt(b.borderTop) + boolToInt(b.borderBottom)
 	}
 	x, y, width, height = x+b.paddingLeft,
 		y+b.paddingTop,
@@ -121,12 +197,31 @@ func (b *Box) GetInnerRect() (int, int, int, int) {
 	return x, y, width, height
 }
 
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+
+	return 0
+}
+
 // SetRect sets a new position of the primitive. Note that this has no effect
 // if this primitive is part of a layout (e.g. Flex, Grid) or if it was added
 // like this:
 //
-//	application.SetRoot(p, true)
+//	application.SetRoot(b, true)
+func (b *Box) Event(f EventerFunc) {
+  if b.evented != nil {
+    f(b.evented)
+  }
+}
+
 func (b *Box) SetRect(x, y, width, height int) {
+  if x != b.x || y != b.y || width != b.width || height != b.height {
+    b.Event(func(f EventedFunc) {
+      f("set.rect", b, x,y,width,height)
+    })
+  }
 	b.x = x
 	b.y = y
 	b.width = width
@@ -142,7 +237,9 @@ func (b *Box) SetRect(x, y, width, height int) {
 // must return the box's inner dimensions (x, y, width, height) which will be
 // returned by GetInnerRect(), used by descendent primitives to draw their own
 // content.
-func (b *Box) SetDrawFunc(handler func(screen tcell.Screen, x, y, width, height int) (int, int, int, int)) *Box {
+func (b *Box) SetDrawFunc(
+	handler func(screen tcell.Screen, x, y, width, height int) (int, int, int, int),
+) *Box {
 	b.draw = handler
 	return b
 }
@@ -152,13 +249,27 @@ func (b *Box) SetDrawFunc(handler func(screen tcell.Screen, x, y, width, height 
 func (b *Box) GetDrawFunc() func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
 	return b.draw
 }
+func (b *Box) SetEventedFunc(
+	handler EventedFunc,
+) *Box {
+	b.evented = handler
+	return b
+}
+
+// GetEventerFunc returns the callback function which was installed with
+// SetEventerFunc() or nil if no such function has been installed.
+func (b *Box) GetEventedFunc() EventedFunc {
+	return b.evented
+}
 
 // WrapInputHandler wraps an input handler (see InputHandler()) with the
 // functionality to capture input (see SetInputCapture()) before passing it
 // on to the provided (default) input handler.
 //
 // This is only meant to be used by subclassing primitives.
-func (b *Box) WrapInputHandler(inputHandler func(*tcell.EventKey, func(p Primitive))) func(*tcell.EventKey, func(p Primitive)) {
+func (b *Box) WrapInputHandler(
+	inputHandler func(*tcell.EventKey, func(p Primitive)),
+) func(*tcell.EventKey, func(p Primitive)) {
 	return func(event *tcell.EventKey, setFocus func(p Primitive)) {
 		if b.inputCapture != nil {
 			event = b.inputCapture(event)
@@ -166,11 +277,13 @@ func (b *Box) WrapInputHandler(inputHandler func(*tcell.EventKey, func(p Primiti
 		if event != nil && inputHandler != nil {
 			inputHandler(event, setFocus)
 		}
+
+		// return event
 	}
 }
 
 // InputHandler returns nil.
-func (b *Box) InputHandler() func(event *tcell.EventKey, setFocus func(p Primitive)) {
+func (b *Box) InputHandler() func(*tcell.EventKey, func(p Primitive)) {
 	return b.WrapInputHandler(nil)
 }
 
@@ -182,9 +295,15 @@ func (b *Box) InputHandler() func(event *tcell.EventKey, setFocus func(p Primiti
 //
 // Providing a nil handler will remove a previously existing handler.
 //
-// This function can also be used on container primitives (like Flex, Grid, or
-// Form) as keyboard events will be handed down until they are handled.
-func (b *Box) SetInputCapture(capture func(event *tcell.EventKey) *tcell.EventKey) *Box {
+// Note that this function will not have an effect on primitives composed of
+// other primitives, such as Form, Flex, or Grid. Key events are only captured
+// by the primitives that have focus (e.g. InputField) and only one primitive
+// can have focus at a time. Composing primitives such as Form pass the focus on
+// to their contained primitives and thus never receive any key events
+// themselves. Therefore, they cannot intercept key events.
+func (b *Box) SetInputCapture(
+	capture func(event *tcell.EventKey) *tcell.EventKey,
+) *Box {
 	b.inputCapture = capture
 	return b
 }
@@ -195,12 +314,19 @@ func (b *Box) GetInputCapture() func(event *tcell.EventKey) *tcell.EventKey {
 	return b.inputCapture
 }
 
+// SetMouseHandler sets the mouse event handler.
+func (b *Box) SetMouseHandler(handler func(event *tcell.EventMouse) bool) {
+	b.mouseHandler = handler
+}
+
 // WrapMouseHandler wraps a mouse event handler (see MouseHandler()) with the
 // functionality to capture mouse events (see SetMouseCapture()) before passing
 // them on to the provided (default) event handler.
 //
 // This is only meant to be used by subclassing primitives.
-func (b *Box) WrapMouseHandler(mouseHandler func(MouseAction, *tcell.EventMouse, func(p Primitive)) (bool, Primitive)) func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive) {
+func (b *Box) WrapMouseHandler(
+	mouseHandler func(MouseAction, *tcell.EventMouse, func(p Primitive)) (bool, Primitive),
+) func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive) {
 	return func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive) {
 		if b.mouseCapture != nil {
 			action, event = b.mouseCapture(action, event)
@@ -214,13 +340,15 @@ func (b *Box) WrapMouseHandler(mouseHandler func(MouseAction, *tcell.EventMouse,
 
 // MouseHandler returns nil.
 func (b *Box) MouseHandler() func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive) {
-	return b.WrapMouseHandler(func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive) {
-		if action == MouseLeftDown && b.InRect(event.Position()) {
-			setFocus(b)
-			consumed = true
-		}
-		return
-	})
+	return b.WrapMouseHandler(
+		func(action MouseAction, event *tcell.EventMouse, setFocus func(p Primitive)) (consumed bool, capture Primitive) {
+			if action == MouseLeftClick && b.InRect(event.Position()) {
+				setFocus(b)
+				consumed = true
+			}
+			return
+		},
+	)
 }
 
 // SetMouseCapture sets a function which captures mouse events (consisting of
@@ -231,7 +359,9 @@ func (b *Box) MouseHandler() func(action MouseAction, event *tcell.EventMouse, s
 // called.
 //
 // Providing a nil handler will remove a previously existing handler.
-func (b *Box) SetMouseCapture(capture func(action MouseAction, event *tcell.EventMouse) (MouseAction, *tcell.EventMouse)) *Box {
+func (b *Box) SetMouseCapture(
+	capture func(action MouseAction, event *tcell.EventMouse) (MouseAction, *tcell.EventMouse),
+) *Box {
 	b.mouseCapture = capture
 	return b
 }
@@ -252,7 +382,12 @@ func (b *Box) GetMouseCapture() func(action MouseAction, event *tcell.EventMouse
 // SetBackgroundColor sets the box's background color.
 func (b *Box) SetBackgroundColor(color tcell.Color) *Box {
 	b.backgroundColor = color
-	b.borderStyle = b.borderStyle.Background(color)
+	return b
+}
+
+// SetReverse turns on or off the reverse video attribute.
+func (b *Box) SetReverse(on bool) *Box {
+	b.reverse = on
 	return b
 }
 
@@ -263,24 +398,18 @@ func (b *Box) SetBorder(show bool) *Box {
 	return b
 }
 
-// SetBorderStyle sets the box's border style.
-func (b *Box) SetBorderStyle(style tcell.Style) *Box {
-	b.borderStyle = style
-	return b
-}
-
-// SetBorderColor sets the box's border color.
-func (b *Box) SetBorderColor(color tcell.Color) *Box {
-	b.borderStyle = b.borderStyle.Foreground(color)
-	return b
-}
-
-// SetBorderAttributes sets the border's style attributes. You can combine
-// different attributes using bitmask operations:
-//
-//	box.SetBorderAttributes(tcell.AttrUnderline | tcell.AttrBold)
 func (b *Box) SetBorderAttributes(attr tcell.AttrMask) *Box {
 	b.borderStyle = b.borderStyle.Attributes(attr)
+	return b
+}
+
+// GetBorderAttributes returns the border's style attributes.
+func (b *Box) GetBorderStyle(bs *BorderStyle) *BorderStyle {
+	return b.borderStyles
+}
+
+func (b *Box) SetBorderStyle(bs *BorderStyle) *Box {
+	b.borderStyles = bs
 	return b
 }
 
@@ -288,6 +417,22 @@ func (b *Box) SetBorderAttributes(attr tcell.AttrMask) *Box {
 func (b *Box) GetBorderAttributes() tcell.AttrMask {
 	_, _, attr := b.borderStyle.Decompose()
 	return attr
+}
+
+// SetBorderColor sets the box's border color.
+func (b *Box) GetBorderVisible() bool {
+	return b.borderVisible
+}
+
+func (b *Box) SetBorderVisible(visible bool) *Box {
+	b.borderVisible = visible
+	return b
+}
+
+// SetBorderColor sets the box's border color.
+func (b *Box) SetBorderColor(color tcell.Color) *Box {
+	b.borderColor = color
+	return b
 }
 
 // GetBorderColor returns the box's border color.
@@ -301,15 +446,61 @@ func (b *Box) GetBackgroundColor() tcell.Color {
 	return b.backgroundColor
 }
 
+// SetBorderFocusColor sets the box's border color when focused.
+func (b *Box) SetBorderFocusColor(color tcell.Color) *Box {
+	b.borderFocusColor = color
+	return b
+}
+
+// SetBorderSides decides which sides of the border should be shown in case the
+// border has been activated.
+func (b *Box) SetBorderSides(top, left, bottom, right bool) *Box {
+	b.borderTop = top
+	b.borderLeft = left
+	b.borderBottom = bottom
+	b.borderRight = right
+
+	return b
+}
+
+// IsBorder indicates whether a border is rendered at all.
+func (b *Box) IsBorder() bool {
+	return b.border
+}
+
+// IsBorderTop indicates whether a border is rendered on the top side of
+// this primitive.
+func (b *Box) IsBorderTop() bool {
+	return b.border && b.borderTop
+}
+
+// IsBorderBottom indicates whether a border is rendered on the bottom side
+// of this primitive.
+func (b *Box) IsBorderBottom() bool {
+	return b.border && b.borderBottom
+}
+
+// IsBorderRight indicates whether a border is rendered on the right side of
+// this primitive.
+func (b *Box) IsBorderRight() bool {
+	return b.border && b.borderRight
+}
+
+// IsBorderLeft indicates whether a border is rendered on the left side of
+// this primitive.
+func (b *Box) IsBorderLeft() bool {
+	return b.border && b.borderLeft
+}
+
+func (b *Box) SetBorderBlinking(blinking bool) *Box {
+	b.borderBlinking = blinking
+	return b
+}
+
 // SetTitle sets the box's title.
 func (b *Box) SetTitle(title string) *Box {
 	b.title = title
 	return b
-}
-
-// GetTitle returns the box's current title.
-func (b *Box) GetTitle() string {
-	return b.title
 }
 
 // SetTitleColor sets the box's title color.
@@ -330,20 +521,19 @@ func (b *Box) Draw(screen tcell.Screen) {
 	b.DrawForSubclass(screen, b)
 }
 
-// DrawForSubclass draws this box under the assumption that primitive p is a
-// subclass of this box. This is needed e.g. to draw proper box frames which
-// depend on the subclass's focus.
-//
-// Only call this function from your own custom primitives. It is not needed in
-// applications that have no custom primitives.
+// Draw draws this primitive onto the screen.
 func (b *Box) DrawForSubclass(screen tcell.Screen, p Primitive) {
 	// Don't draw anything if there is no space.
-	if b.width <= 0 || b.height <= 0 {
+	if b.width <= 0 || b.height <= 0 || !b.visible {
 		return
 	}
 
+	borderVisible := b.borderVisible
+
+	def := tcell.StyleDefault
+
 	// Fill background.
-	background := tcell.StyleDefault.Background(b.backgroundColor)
+	background := def.Background(b.backgroundColor).Reverse(b.reverse)
 	if !b.dontClear {
 		for y := b.y; y < b.y+b.height; y++ {
 			for x := b.x; x < b.x+b.width; x++ {
@@ -353,94 +543,383 @@ func (b *Box) DrawForSubclass(screen tcell.Screen, p Primitive) {
 	}
 
 	// Draw border.
-	if b.border && b.width >= 2 && b.height >= 2 {
-		var vertical, horizontal, topLeft, topRight, bottomLeft, bottomRight rune
-		if p.HasFocus() {
-			horizontal = Borders.HorizontalFocus
-			vertical = Borders.VerticalFocus
-			topLeft = Borders.TopLeftFocus
-			topRight = Borders.TopRightFocus
-			bottomLeft = Borders.BottomLeftFocus
-			bottomRight = Borders.BottomRightFocus
-		} else {
-			horizontal = Borders.Horizontal
-			vertical = Borders.Vertical
-			topLeft = Borders.TopLeft
-			topRight = Borders.TopRight
-			bottomLeft = Borders.BottomLeft
-			bottomRight = Borders.BottomRight
-		}
-		for x := b.x + 1; x < b.x+b.width-1; x++ {
-			screen.SetContent(x, b.y, horizontal, nil, b.borderStyle)
-			screen.SetContent(x, b.y+b.height-1, horizontal, nil, b.borderStyle)
-		}
-		for y := b.y + 1; y < b.y+b.height-1; y++ {
-			screen.SetContent(b.x, y, vertical, nil, b.borderStyle)
-			screen.SetContent(b.x+b.width-1, y, vertical, nil, b.borderStyle)
-		}
-		screen.SetContent(b.x, b.y, topLeft, nil, b.borderStyle)
-		screen.SetContent(b.x+b.width-1, b.y, topRight, nil, b.borderStyle)
-		screen.SetContent(b.x, b.y+b.height-1, bottomLeft, nil, b.borderStyle)
-		screen.SetContent(b.x+b.width-1, b.y+b.height-1, bottomRight, nil, b.borderStyle)
-
-		// Draw title.
-		if b.title != "" && b.width >= 4 {
-			printed, _ := Print(screen, b.title, b.x+1, b.y, b.width-2, b.titleAlign, b.titleColor)
-			if len(b.title)-printed > 0 && printed > 0 {
-				_, _, style, _ := screen.GetContent(b.x+b.width-2, b.y)
-				fg, _, _ := style.Decompose()
-				Print(screen, string(SemigraphicsHorizontalEllipsis), b.x+b.width-2, b.y, 1, AlignLeft, fg)
-			}
-		}
-	}
+	b.DrawBorder(borderVisible, background, screen)
 
 	// Call custom draw function.
 	if b.draw != nil {
-		b.innerX, b.innerY, b.innerWidth, b.innerHeight = b.draw(screen, b.x, b.y, b.width, b.height)
+		b.innerX, b.innerY, b.innerWidth, b.innerHeight = b.draw(
+			screen,
+			b.x,
+			b.y,
+			b.width,
+			b.height,
+		)
 	} else {
 		// Remember the inner rect.
 		b.innerX = -1
 		b.innerX, b.innerY, b.innerWidth, b.innerHeight = b.GetInnerRect()
 	}
+
+	if !b.animating {
+		// Clamp inner rect to screen.
+		width, height := screen.Size()
+		if b.innerX < 0 {
+			b.innerWidth += b.innerX
+			b.innerX = 0
+		}
+		if b.innerX+b.innerWidth >= width {
+			b.innerWidth = width - b.innerX
+		}
+		if b.innerY+b.innerHeight >= height {
+			b.innerHeight = height - b.innerY
+		}
+		if b.innerY < 0 {
+			b.innerHeight += b.innerY
+			b.innerY = 0
+		}
+
+		if b.innerWidth < 0 {
+			b.innerWidth = 0
+		}
+		if b.innerHeight < 0 {
+			b.innerHeight = 0
+		}
+	}
+	return
 }
 
-// SetFocusFunc sets a callback function which is invoked when this primitive
-// receives focus. Container primitives such as Flex or Grid may not be notified
-// if one of their descendents receive focus directly.
-//
-// Set to nil to remove the callback function.
-func (b *Box) SetFocusFunc(callback func()) *Box {
-	b.focus = callback
-	return b
-}
+func (b *Box) DrawBorder(borderVisible bool, background tcell.Style, screen tcell.Screen) bool {
+	// background = tcell.StyleDefault.Background(0)
+	if b.border && b.width >= 2 && b.height >= 1 {
+		var borderStyle tcell.Style
+		if b.hasFocus {
+			if b.borderVisible {
+				borderVisible = true
+			}
+			borderStyle = background.Foreground(b.borderFocusColor)
+			IsVtxxx := func() bool {
+				return false
+			}()
+			if IsVtxxx {
+				borderStyle = borderStyle.Bold(true)
+			}
+		} else {
+			borderStyle = background.Foreground(b.borderColor)
+		}
 
-// SetBlurFunc sets a callback function which is invoked when this primitive
-// loses focus. This does not apply to container primitives such as Flex or
-// Grid.
-//
-// Set to nil to remove the callback function.
-func (b *Box) SetBlurFunc(callback func()) *Box {
-	b.blur = callback
-	return b
+		if b.borderBlinking {
+			borderStyle = borderStyle.Blink(true)
+		}
+
+		vertical, horizontal, topLeft, topRight, bottomLeft, bottomRight := ' ', ' ', ' ', ' ', ' ', ' '
+		leftVertical, topHorizontal, rightVertical, bottomHorizontal := ' ', ' ', ' ', ' '
+		ifc := func(a, b rune) rune {
+			if a == rune(0) {
+				return b
+			}
+			return a
+		}
+		if borderVisible {
+
+			horizontal = b.borderStyles.Horizontal
+			vertical = b.borderStyles.Vertical
+			topLeft = b.borderStyles.TopLeft
+			topRight = b.borderStyles.TopRight
+			bottomLeft = b.borderStyles.BottomLeft
+			bottomRight = b.borderStyles.BottomRight
+			leftVertical = ifc(b.borderStyles.LeftVertical, vertical)
+			rightVertical = ifc(b.borderStyles.RightVertical, vertical)
+			topHorizontal = ifc(b.borderStyles.TopHorizontal, horizontal)
+			bottomHorizontal = ifc(b.borderStyles.BottomHorizontal, horizontal)
+
+		} else {
+		}
+
+		if b.borderTop {
+			for x := b.x + 1; x < b.x+b.width-1; x++ {
+				screen.SetContent(x, b.y, topHorizontal, nil, borderStyle)
+			}
+
+			if b.borderLeft {
+				screen.SetContent(b.x, b.y, topLeft, nil, borderStyle)
+			} else {
+				screen.SetContent(b.x, b.y, topHorizontal, nil, borderStyle)
+			}
+
+			if b.borderRight {
+				screen.SetContent(b.x+b.width-1, b.y, topRight, nil, borderStyle)
+			} else {
+				screen.SetContent(b.x+b.width-1, b.y, topHorizontal, nil, borderStyle)
+			}
+		}
+
+		if b.height > 1 {
+			if b.borderBottom {
+				for x := b.x + 1; x < b.x+b.width-1; x++ {
+					screen.SetContent(x, b.y+b.height-1, bottomHorizontal, nil, borderStyle)
+				}
+
+				if b.borderLeft {
+					screen.SetContent(b.x, b.y+b.height-1, bottomLeft, nil, borderStyle)
+				} else {
+					screen.SetContent(b.x, b.y+b.height-1, bottomHorizontal, nil, borderStyle)
+				}
+				if b.borderRight {
+					screen.SetContent(
+						b.x+b.width-1,
+						b.y+b.height-1,
+						bottomRight,
+						nil,
+						borderStyle,
+					)
+				} else {
+					screen.SetContent(b.x+b.width-1, b.y+b.height-1, bottomHorizontal, nil, borderStyle)
+				}
+			}
+
+			if b.borderLeft {
+				for y := b.y + 1; y < b.y+b.height-1; y++ {
+					screen.SetContent(b.x, y, leftVertical, nil, borderStyle)
+				}
+
+				if b.borderTop {
+					screen.SetContent(b.x, b.y, topLeft, nil, borderStyle)
+				} else {
+					screen.SetContent(b.x, b.y, leftVertical, nil, borderStyle)
+				}
+
+				if b.borderBottom {
+					screen.SetContent(b.x, b.y+b.height-1, bottomLeft, nil, borderStyle)
+				} else {
+					screen.SetContent(b.x, b.y+b.height-1, leftVertical, nil, borderStyle)
+				}
+			}
+
+			if b.borderRight {
+				for y := b.y + 1; y < b.y+b.height-1; y++ {
+					screen.SetContent(b.x+b.width-1, y, rightVertical, nil, borderStyle)
+				}
+
+				if b.borderTop {
+					screen.SetContent(b.x+b.width-1, b.y, topRight, nil, borderStyle)
+				} else {
+					screen.SetContent(b.x+b.width-1, b.y, rightVertical, nil, borderStyle)
+				}
+
+				if b.borderBottom {
+					screen.SetContent(
+						b.x+b.width-1,
+						b.y+b.height-1,
+						bottomRight,
+						nil,
+						borderStyle,
+					)
+				} else {
+					screen.SetContent(b.x+b.width-1, b.y+b.height-1, rightVertical, nil, borderStyle)
+				}
+			}
+		} else if b.height == 1 && !b.borderTop && !b.borderBottom {
+			if b.borderLeft {
+				screen.SetContent(b.x, b.y, leftVertical, nil, borderStyle)
+			}
+			if b.borderRight {
+				screen.SetContent(b.x+b.width-1, b.y+b.height-1, rightVertical, nil, borderStyle)
+			}
+		}
+
+		if b.title != "" && b.width >= 4 {
+			_, _ = Print(
+				screen,
+				b.title,
+				b.x+1,
+				b.y,
+				b.width-2,
+				b.titleAlign,
+				b.titleColor,
+			)
+			// if len(b.title)-printed > 0 && printed > 0 {
+			// 	_, _, style, _ := screen.GetContent(b.x+b.width-2, b.y)
+			// 	fg, _, _ := style.Decompose()
+			// 	Print(
+			// 		screen,
+			// 		string(SemigraphicsHorizontalEllipsis),
+			// 		b.x+b.width-2,
+			// 		b.y,
+			// 		1,
+			// 		AlignLeft,
+			// 		fg,
+			// 	)
+			// }
+		}
+	}
+	return false
 }
 
 // Focus is called when this primitive receives focus.
 func (b *Box) Focus(delegate func(p Primitive)) {
 	b.hasFocus = true
-	if b.focus != nil {
-		b.focus()
+	if b.onFocus != nil {
+		b.onFocus()
 	}
 }
 
 // Blur is called when this primitive loses focus.
 func (b *Box) Blur() {
-	if b.blur != nil {
-		b.blur()
-	}
 	b.hasFocus = false
+	if b.onBlur != nil {
+		b.onBlur()
+	}
+}
+
+// SetNextFocusableComponents decides which components are to be focused using
+// a certain focus direction. If more than one component is passed, the
+// priority goes from left-most to right-most. A component will be skipped if
+// it is not visible.
+func (b *Box) SetNextFocusableComponents(
+	direction FocusDirection,
+	components ...Primitive,
+) {
+	b.nextFocusableComponents[direction] = components
+}
+
+// NextFocusableComponent decides which component should receive focus next.
+// If nil is returned, the focus is retained.
+func (b *Box) NextFocusableComponent(direction FocusDirection) Primitive {
+	components, avail := b.nextFocusableComponents[direction]
+	if avail {
+		for _, comp := range components {
+			if comp.IsVisible() {
+				return comp
+			}
+		}
+	}
+
+	return nil
+}
+
+func (b *Box) GetAnimating() bool {
+	return b.animating
+}
+
+func (b *Box) SetAnimating(anim bool) {
+	b.animating = anim
+	// return b
 }
 
 // HasFocus returns whether or not this primitive has focus.
 func (b *Box) HasFocus() bool {
 	return b.hasFocus
+}
+
+// GetFocusable returns the item's Focusable.
+func (b *Box) GetFocusable() Focusable {
+	return b.focus
+}
+
+// SetIndicateOverflow toggles whether overflow arrows can be drawn in order to
+// signal that the component contains content that is out of the viewarea.
+func (b *Box) SetIndicateOverflow(indicateOverflow bool) *Box {
+	b.indicateOverflow = indicateOverflow
+	return b
+}
+
+// SetParent defines which component this primitive is currently being
+// treated as a child of. This should never be called manually.
+func (b *Box) SetParent(parent Primitive) {
+	// Reparenting is possible!
+	b.parent = parent
+}
+
+func (b *Box) DrawOverflow(screen tcell.Screen, showTop, showBottom bool, pct ...float64) {
+	if b.indicateOverflow && b.height > 1 {
+		overflowIndicatorX := b.innerX + b.innerWidth // - (b.paddingRight)
+		style := tcell.StyleDefault.Foreground(Styles.InverseTextColor).
+			Background(tcell.GetColor("#202020"))
+		bgStyle := tcell.StyleDefault.Background(tcell.GetColor("#202020"))
+		topStyle := style
+		bottomStyle := style
+		pcent := 0.0
+		if len(pct) > 0 {
+			pcent = pct[0]
+		}
+		if !showTop {
+			topStyle = style.Foreground(tcell.GetColor("#404040"))
+		}
+		if !showBottom {
+			bottomStyle = style.Foreground(tcell.GetColor("#404040"))
+		}
+		pos := 0.0
+		stp := float64(b.innerHeight-1) / 100.0
+		if pcent != 0.0 {
+			if pcent < 1.0 && pcent > 0.0 {
+				pos = float64(pcent*100.0) * stp
+			} else if pcent > 1.0 {
+				pos = float64(pcent) * stp
+			}
+			pos = math.Ceil(pos)
+		}
+
+		// epsilon := math.Nextafter(1, 2) - 1
+		for i := 1; i < b.innerHeight-1; i++ {
+			opo := float64(i)
+			// fmt.Println(pcent, pos, math.Abs(pos-opo-stp), pos-opo, stp)
+			if pos != 0.0 && math.Abs(float64(int(pos-opo))) <= 1 {
+				screen.SetContent(
+					overflowIndicatorX,
+					i+b.innerY+1,
+					' ',
+					// []rune{' '},
+					nil,
+					bgStyle.Background(tcell.GetColor("#505050")),
+				)
+			} else {
+				screen.SetContent(
+					overflowIndicatorX,
+					i+b.innerY+1,
+					' ',
+					// []rune{' '},
+					nil,
+					bgStyle,
+				)
+			}
+
+		}
+		// ⇑⇓ ﰵ ﰬ ▲ ⬇⬆ 🭭 🭯 🮦🢁🢃🡹🡻🭩🭫🭭🭯a 🮧▼
+		screen.SetContent(
+			overflowIndicatorX,
+			b.innerY,
+			'🭫',
+			// []rune{' '},
+			nil,
+			topStyle.Reverse(true),
+		)
+		// if showBottom {
+			screen.SetContent(
+				overflowIndicatorX,
+				b.innerY+b.innerHeight+b.paddingBottom-1,
+				'🭩',
+				// []rune{' '},
+				nil,
+				bottomStyle.Reverse(true),
+			)
+		// }
+	}
+}
+
+// GetParent returns the current parent or nil if the parent hasn't been
+// set yet.
+func (b *Box) GetParent() Primitive {
+	return b.parent
+}
+
+// SetOnPaste defines the function that's called in OnPaste.
+func (b *Box) SetOnPaste(onPaste func([]rune)) {
+	b.onPaste = onPaste
+}
+
+// OnPaste is called when a bracketed paste is finished.
+func (b *Box) OnPaste(runes []rune) {
+	if b.onPaste != nil {
+		b.onPaste(runes)
+	}
 }

@@ -139,7 +139,7 @@ const (
 	BoxDrawingsLightUpAndHeavyDown                rune = '\u257d' // ╽
 	BoxDrawingsHeavyLeftAndLightRight             rune = '\u257e' // ╾
 	BoxDrawingsHeavyUpAndLightDown                rune = '\u257f' // ╿
-
+  
 	// Block Elements.
 	BlockUpperHalfBlock                              rune = '\u2580' // ▀
 	BlockLowerOneEighthBlock                         rune = '\u2581' // ▁

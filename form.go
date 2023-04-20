@@ -1,21 +1,13 @@
 package tview
 
 import (
-	"image"
-
 	"github.com/gdamore/tcell/v2"
 )
 
-var (
-	// DefaultFormFieldWidth is the default field screen width of form elements
-	// whose field width is flexible (0). This is used in the Form class for
-	// horizontal layouts.
-	DefaultFormFieldWidth = 10
-
-	// DefaultFormFieldHeight is the default field height of multi-line form
-	// elements whose field height is flexible (0).
-	DefaultFormFieldHeight = 5
-)
+// DefaultFormFieldWidth is the default field screen width of form elements
+// whose field width is flexible (0). This is used in the Form class for
+// horizontal layouts.
+var DefaultFormFieldWidth = 10
 
 // FormItem is the interface all form items must implement to be able to be
 // included in a form.
@@ -34,21 +26,11 @@ type FormItem interface {
 	// required.
 	GetFieldWidth() int
 
-	// GetFieldHeight returns the height of the form item's field (the area which
-	// is manipulated by the user). This value must be greater than 0.
-	GetFieldHeight() int
-
 	// SetFinishedFunc sets the handler function for when the user finished
 	// entering data into the item. The handler may receive events for the
-	// Enter key (we're done), the Escape key (cancel input), the Tab key (move
-	// to next field), the Backtab key (move to previous field), or a negative
-	// value, indicating that the action for the last known key should be
-	// repeated.
+	// Enter key (we're done), the Escape key (cancel input), the Tab key (move to
+	// next field), and the Backtab key (move to previous field).
 	SetFinishedFunc(handler func(key tcell.Key)) FormItem
-
-	// SetDisabled sets whether or not the item is disabled / read-only. A form
-	// must have at least one item that is not disabled.
-	SetDisabled(disabled bool) FormItem
 }
 
 // Form allows you to combine multiple one-line form elements into a vertical
@@ -73,7 +55,7 @@ type Form struct {
 	// The alignment of the buttons.
 	buttonsAlign int
 
-	// The number of empty cells between items.
+	// The number of empty rows between items.
 	itemPadding int
 
 	// The index of the item or button which has focus. (Items are counted first,
@@ -90,18 +72,11 @@ type Form struct {
 	// The text color of the input area.
 	fieldTextColor tcell.Color
 
-	// The style of the buttons when they are not focused.
-	buttonStyle tcell.Style
+	// The background color of the buttons.
+	buttonBackgroundColor tcell.Color
 
-	// The style of the buttons when they are focused.
-	buttonActivatedStyle tcell.Style
-
-	// The style of the buttons when they are disabled.
-	buttonDisabledStyle tcell.Style
-
-	// The last (valid) key that wsa sent to a "finished" handler or -1 if no
-	// such key is known yet.
-	lastFinishedKey tcell.Key
+	// The color of the button text.
+	buttonTextColor tcell.Color
 
 	// An optional function which is called when the user hits Escape.
 	cancel func()
@@ -112,14 +87,13 @@ func NewForm() *Form {
 	box := NewBox().SetBorderPadding(1, 1, 1, 1)
 
 	f := &Form{
-		Box:                  box,
-		itemPadding:          1,
-		labelColor:           Styles.SecondaryTextColor,
-		fieldBackgroundColor: Styles.ContrastBackgroundColor,
-		fieldTextColor:       Styles.PrimaryTextColor,
-		buttonStyle:          tcell.StyleDefault.Background(Styles.ContrastBackgroundColor).Foreground(Styles.PrimaryTextColor),
-		buttonActivatedStyle: tcell.StyleDefault.Background(Styles.PrimaryTextColor).Foreground(Styles.ContrastBackgroundColor),
-		lastFinishedKey:      tcell.KeyTab, // To skip over inactive elements at the beginning of the form.
+		Box:                   box,
+		itemPadding:           1,
+		labelColor:            Styles.SecondaryTextColor,
+		fieldBackgroundColor:  Styles.ContrastBackgroundColor,
+		fieldTextColor:        Styles.PrimaryTextColor,
+		buttonBackgroundColor: Styles.ContrastBackgroundColor,
+		buttonTextColor:       Styles.PrimaryTextColor,
 	}
 
 	return f
@@ -167,31 +141,15 @@ func (f *Form) SetButtonsAlign(align int) *Form {
 	return f
 }
 
-// SetButtonBackgroundColor sets the background color of the buttons. This is
-// also the text color of the buttons when they are focused.
+// SetButtonBackgroundColor sets the background color of the buttons.
 func (f *Form) SetButtonBackgroundColor(color tcell.Color) *Form {
-	f.buttonStyle = f.buttonStyle.Background(color)
-	f.buttonActivatedStyle = f.buttonActivatedStyle.Foreground(color)
+	f.buttonBackgroundColor = color
 	return f
 }
 
-// SetButtonTextColor sets the color of the button texts. This is also the
-// background of the buttons when they are focused.
+// SetButtonTextColor sets the color of the button texts.
 func (f *Form) SetButtonTextColor(color tcell.Color) *Form {
-	f.buttonStyle = f.buttonStyle.Foreground(color)
-	f.buttonActivatedStyle = f.buttonActivatedStyle.Background(color)
-	return f
-}
-
-// SetButtonStyle sets the style of the buttons when they are not focused.
-func (f *Form) SetButtonStyle(style tcell.Style) *Form {
-	f.buttonStyle = style
-	return f
-}
-
-// SetButtonActivatedStyle sets the style of the buttons when they are focused.
-func (f *Form) SetButtonActivatedStyle(style tcell.Style) *Form {
-	f.buttonActivatedStyle = style
+	f.buttonTextColor = color
 	return f
 }
 
@@ -206,56 +164,6 @@ func (f *Form) SetFocus(index int) *Form {
 	} else {
 		f.focusedElement = index
 	}
-	return f
-}
-
-// AddTextArea adds a text area to the form. It has a label, an optional initial
-// text, a size (width and height) referring to the actual input area (a
-// fieldWidth of 0 extends it as far right as possible, a fieldHeight of 0 will
-// cause it to be [DefaultFormFieldHeight]), and a maximum number of bytes of
-// text allowed (0 means no limit).
-//
-// The optional callback function is invoked when the content of the text area
-// has changed. Note that especially for larger texts, this is an expensive
-// operation due to technical constraints of the [TextArea] primitive (every key
-// stroke leads to a new reallocation of the entire text).
-func (f *Form) AddTextArea(label, text string, fieldWidth, fieldHeight, maxLength int, changed func(text string)) *Form {
-	if fieldHeight == 0 {
-		fieldHeight = DefaultFormFieldHeight
-	}
-	textArea := NewTextArea().
-		SetLabel(label).
-		SetSize(fieldHeight, fieldWidth).
-		SetMaxLength(maxLength)
-	if text != "" {
-		textArea.SetText(text, true)
-	}
-	if changed != nil {
-		textArea.SetChangedFunc(func() {
-			changed(textArea.GetText())
-		})
-	}
-	f.items = append(f.items, textArea)
-	return f
-}
-
-// AddTextView adds a text view to the form. It has a label and text, a size
-// (width and height) referring to the actual text element (a fieldWidth of 0
-// extends it as far right as possible, a fieldHeight of 0 will cause it to be
-// [DefaultFormFieldHeight]), a flag to turn on/off dynamic colors, and a flag
-// to turn on/off scrolling. If scrolling is turned off, the text view will not
-// receive focus.
-func (f *Form) AddTextView(label, text string, fieldWidth, fieldHeight int, dynamicColors, scrollable bool) *Form {
-	if fieldHeight == 0 {
-		fieldHeight = DefaultFormFieldHeight
-	}
-	textArea := NewTextView().
-		SetLabel(label).
-		SetSize(fieldHeight, fieldWidth).
-		SetDynamicColors(dynamicColors).
-		SetScrollable(scrollable).
-		SetText(text)
-	f.items = append(f.items, textArea)
 	return f
 }
 
@@ -313,21 +221,6 @@ func (f *Form) AddCheckbox(label string, checked bool, changed func(checked bool
 		SetLabel(label).
 		SetChecked(checked).
 		SetChangedFunc(changed))
-	return f
-}
-
-// AddImage adds an image to the form. It has a label and the image will fit in
-// the specified width and height (its aspect ratio is preserved). See
-// [Image.SetColors] for a description of the "colors" parameter. Images are not
-// interactive and are skipped over in a form. The "width" value may be 0
-// (adjust dynamically) but "height" should generally be a positive value.
-func (f *Form) AddImage(label string, image image.Image, width, height, colors int) *Form {
-	f.items = append(f.items, NewImage().
-		SetLabel(label).
-		SetImage(image).
-		SetSize(height, width).
-		SetAlign(AlignTop, AlignLeft).
-		SetColors(colors))
 	return f
 }
 
@@ -493,19 +386,15 @@ func (f *Form) Draw(screen tcell.Screen) {
 	maxLabelWidth++ // Add one space.
 
 	// Calculate positions of form items.
-	type position struct{ x, y, width, height int }
-	positions := make([]position, len(f.items)+len(f.buttons))
-	var (
-		focusedPosition position
-		lineHeight      = 1
-	)
+	positions := make([]struct{ x, y, width, height int }, len(f.items)+len(f.buttons))
+	var focusedPosition struct{ x, y, width, height int }
 	for index, item := range f.items {
 		// Calculate the space needed.
 		labelWidth := TaggedStringWidth(item.GetLabel())
 		var itemWidth int
 		if f.horizontal {
 			fieldWidth := item.GetFieldWidth()
-			if fieldWidth <= 0 {
+			if fieldWidth == 0 {
 				fieldWidth = DefaultFormFieldWidth
 			}
 			labelWidth++
@@ -515,21 +404,11 @@ func (f *Form) Draw(screen tcell.Screen) {
 			labelWidth = maxLabelWidth
 			itemWidth = width
 		}
-		itemHeight := item.GetFieldHeight()
-		if itemHeight <= 0 {
-			itemHeight = DefaultFormFieldHeight
-		}
 
 		// Advance to next line if there is no space.
 		if f.horizontal && x+labelWidth+1 >= rightLimit {
 			x = startX
-			y += lineHeight + 1
-			lineHeight = itemHeight
-		}
-
-		// Update line height.
-		if itemHeight > lineHeight {
-			lineHeight = itemHeight
+			y += 2
 		}
 
 		// Adjust the item's attributes.
@@ -548,7 +427,7 @@ func (f *Form) Draw(screen tcell.Screen) {
 		positions[index].x = x
 		positions[index].y = y
 		positions[index].width = itemWidth
-		positions[index].height = itemHeight
+		positions[index].height = 1
 		if item.HasFocus() {
 			focusedPosition = positions[index]
 		}
@@ -557,7 +436,7 @@ func (f *Form) Draw(screen tcell.Screen) {
 		if f.horizontal {
 			x += itemWidth + f.itemPadding
 		} else {
-			y += itemHeight + f.itemPadding
+			y += 1 + f.itemPadding
 		}
 	}
 
@@ -592,9 +471,8 @@ func (f *Form) Draw(screen tcell.Screen) {
 		if f.horizontal {
 			if space < buttonWidth-4 {
 				x = startX
-				y += lineHeight + 1
+				y += 2
 				space = width
-				lineHeight = 1
 			}
 		} else {
 			if space < 1 {
@@ -604,8 +482,10 @@ func (f *Form) Draw(screen tcell.Screen) {
 		if buttonWidth > space {
 			buttonWidth = space
 		}
-		button.SetStyle(f.buttonStyle).
-			SetActivatedStyle(f.buttonActivatedStyle)
+		button.SetLabelColor(f.buttonTextColor).
+			SetLabelColorActivated(f.buttonBackgroundColor).
+			SetBackgroundColorActivated(f.buttonTextColor).
+			SetBackgroundColor(f.buttonBackgroundColor)
 
 		buttonIndex := index + len(f.items)
 		positions[buttonIndex].x = x
@@ -669,15 +549,17 @@ func (f *Form) Draw(screen tcell.Screen) {
 
 // Focus is called by the application when the primitive receives focus.
 func (f *Form) Focus(delegate func(p Primitive)) {
+	if len(f.items)+len(f.buttons) == 0 {
+		f.Box.Focus(delegate)
+		return
+	}
+	f.hasFocus = false
+
 	// Hand on the focus to one of our child elements.
 	if f.focusedElement < 0 || f.focusedElement >= len(f.items)+len(f.buttons) {
 		f.focusedElement = 0
 	}
-	var handler func(key tcell.Key)
-	handler = func(key tcell.Key) {
-		if key >= 0 {
-			f.lastFinishedKey = key
-		}
+	handler := func(key tcell.Key) {
 		switch key {
 		case tcell.KeyTab, tcell.KeyEnter:
 			f.focusedElement++
@@ -695,49 +577,19 @@ func (f *Form) Focus(delegate func(p Primitive)) {
 				f.focusedElement = 0
 				f.Focus(delegate)
 			}
-		default:
-			if key < 0 && f.lastFinishedKey >= 0 {
-				// Repeat the last action.
-				handler(f.lastFinishedKey)
-			}
 		}
 	}
 
-	// Track whether a form item has focus.
-	var itemFocused bool
-	f.hasFocus = false
-
-	// Set the handler and focus for all items and buttons.
-	for index, button := range f.buttons {
-		button.SetExitFunc(handler)
-		if f.focusedElement == index+len(f.items) {
-			if button.IsDisabled() {
-				f.focusedElement++
-				if f.focusedElement >= len(f.items)+len(f.buttons) {
-					f.focusedElement = 0
-				}
-				continue
-			}
-
-			itemFocused = true
-			func(b *Button) { // Wrapping might not be necessary anymore in future Go versions.
-				defer delegate(b)
-			}(button)
-		}
-	}
-	for index, item := range f.items {
+	if f.focusedElement < len(f.items) {
+		// We're selecting an item.
+		item := f.items[f.focusedElement]
 		item.SetFinishedFunc(handler)
-		if f.focusedElement == index {
-			itemFocused = true
-			func(i FormItem) { // Wrapping might not be necessary anymore in future Go versions.
-				defer delegate(i)
-			}(item)
-		}
-	}
-
-	// If no item was focused, focus the form itself.
-	if !itemFocused {
-		f.Box.Focus(delegate)
+		delegate(item)
+	} else {
+		// We're selecting a button.
+		button := f.buttons[f.focusedElement-len(f.items)]
+		button.SetExitFunc(handler)
+		delegate(button)
 	}
 }
 
@@ -781,12 +633,6 @@ func (f *Form) MouseHandler() func(action MouseAction, event *tcell.EventMouse, 
 
 		// Determine items to pass mouse events to.
 		for _, item := range f.items {
-			// Exclude TextView items from mouse-down events as they are
-			// read-only items and thus should not be focused.
-			if _, ok := item.(*TextView); ok && action == MouseLeftDown {
-				continue
-			}
-
 			consumed, capture = item.MouseHandler()(action, event, setFocus)
 			if consumed {
 				return
@@ -799,10 +645,9 @@ func (f *Form) MouseHandler() func(action MouseAction, event *tcell.EventMouse, 
 			}
 		}
 
-		// A mouse down anywhere else will return the focus to the last selected
+		// A mouse click anywhere else will return the focus to the last selected
 		// element.
-		if action == MouseLeftDown && f.InRect(event.Position()) {
-			f.Focus(setFocus)
+		if action == MouseLeftClick && f.InRect(event.Position()) {
 			consumed = true
 		}
 
