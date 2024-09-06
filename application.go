@@ -412,9 +412,10 @@ EventLoop:
     case *tcell.EventPaste:
       if a.onPaste != nil {
       a.onPaste(a.screen, event)
-      if event != nil {
-        a.GetFocus().OnPaste([]rune(event.Text()))
-      }
+      // this is broken, just comment it out for now
+      // if event != nil {
+      //   a.GetFocus().OnPaste([]rune(event.Text()))
+      // }
       break
     }
     fmt.Println("No paste handler", event)
