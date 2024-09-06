@@ -1,4 +1,4 @@
-module github.com/digitallyserviced/tview
+module github.com/justdan96/tview
 
 go 1.18
 
